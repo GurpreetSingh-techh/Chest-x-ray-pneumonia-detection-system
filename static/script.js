@@ -405,8 +405,30 @@ document.addEventListener("DOMContentLoaded", function () {
             });
 
 
-            const data = await response.json();
+            const responseText = await response.text();
 
+console.log("HTTP Status:", response.status);
+console.log("Server Response:", responseText);
+
+if (!responseText || responseText.trim() === "") {
+    throw new Error(
+        "The server returned an empty response. Check Render logs."
+    );
+}
+
+let data;
+
+try {
+    data = JSON.parse(responseText);
+} catch (error) {
+    throw new Error(
+        "The server returned invalid JSON: " + responseText.substring(0, 300)
+    );
+}
+
+if (!response.ok) {
+    throw new Error(data.error || "Prediction failed.");
+}
             console.log("Flask response:", data);
 
 
