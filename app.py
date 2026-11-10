@@ -17,11 +17,11 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MODEL_PATH = os.path.join(
-    BASE_DIR,
-    "models",
-    "pneumonia_densenet121.keras"
-)
+from huggingface_hub import hf_hub_download
+
+MODEL_PATH = hf_hub_download(
+    repo_id="GurpreetSingh21/x_ray_detection_system_model",
+    filename="pneumonia_densenet121.keras"
 
 
 # ---------------------------------------
