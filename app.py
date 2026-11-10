@@ -1,377 +1,424 @@
-// ---------------------------------------
-// GET HTML ELEMENTS
-// ---------------------------------------
+import os
+import io
+import base64
 
-const imageInput = document.getElementById("imageInput");
+import numpy as np
+import tensorflow as tf
 
-const dropArea = document.getElementById("dropArea");
+from flask import Flask, render_template, request, jsonify
+from PIL import Image, UnidentifiedImageError
 
-const browseButton = document.getElementById("browseButton");
+from huggingface_hub import hf_hub_download
 
-const uploadContent = document.getElementById("uploadContent");
 
-const previewContainer = document.getElementById("previewContainer");
+# --------------------------------------------------
+# FLASK APP CONFIGURATION
+# --------------------------------------------------
 
-const previewImage = document.getElementById("previewImage");
+app = Flask(__name__)
 
-const fileName = document.getElementById("fileName");
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-const removeImage = document.getElementById("removeImage");
+MODEL_PATH = hf_hub_download(
+    repo_id="GurpreetSingh21/x_ray_detection_system_model",
+    filename="pneumonia_densenet121.keras"
+)
 
-const analyzeButton = document.getElementById("analyzeButton");
+IMAGE_SIZE = (224, 224)
 
-const loadingText = document.getElementById("loadingText");
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
-const errorMessage = document.getElementById("errorMessage");
 
-const emptyResult = document.getElementById("emptyResult");
+# --------------------------------------------------
+# LOAD TRAINED MODEL
+# --------------------------------------------------
 
-const resultContent = document.getElementById("resultContent");
+print("Loading Pneumonia Detection Model...")
 
-const gradcamSection = document.getElementById("gradcamSection");
+model = tf.keras.models.load_model(
+    MODEL_PATH,
+    compile=False
+)
 
-const gradcamImage = document.getElementById("gradcamImage");
+print("Model loaded successfully!")
 
-let selectedFile = null;
 
+# --------------------------------------------------
+# IMAGE PREPROCESSING
+# --------------------------------------------------
 
-// ---------------------------------------
-// OPEN FILE BROWSER
-// ---------------------------------------
+def preprocess_image(image):
 
-browseButton.addEventListener("click", function () {
+    image = image.convert("RGB")
 
-    imageInput.click();
+    image = image.resize(
+        IMAGE_SIZE,
+        Image.Resampling.LANCZOS
+    )
 
-});
+    image_array = np.array(
+        image,
+        dtype=np.float32
+    )
 
+    image_array = np.expand_dims(
+        image_array,
+        axis=0
+    )
 
-// ---------------------------------------
-// IMAGE SELECTION
-// ---------------------------------------
+    return image_array
 
-imageInput.addEventListener("change", function () {
 
-    const file = imageInput.files[0];
+# --------------------------------------------------
+# MODEL PREDICTION
+# --------------------------------------------------
 
-    if (file) {
+def get_prediction(image_array):
 
-        handleFile(file);
+    prediction = model.predict(
+        image_array,
+        verbose=0
+    )
 
-    }
+    prediction = np.asarray(prediction)
 
-});
+    if prediction.size == 1:
 
+        pneumonia_score = float(
+            prediction.reshape(-1)[0]
+        )
 
-// ---------------------------------------
-// HANDLE IMAGE
-// ---------------------------------------
+    elif prediction.shape[-1] == 2:
 
-function handleFile(file) {
+        pneumonia_score = float(
+            prediction.reshape(-1, 2)[0][1]
+        )
 
-    errorMessage.classList.add("hidden");
+    else:
 
-    const allowedTypes = [
-        "image/jpeg",
-        "image/png"
-    ];
+        raise ValueError(
+            "Unexpected model output shape."
+        )
 
-    if (!allowedTypes.includes(file.type)) {
+    pneumonia_score = float(
+        np.clip(pneumonia_score, 0, 1)
+    )
 
-        showError("Please select a JPG or PNG image.");
+    normal_score = 1 - pneumonia_score
 
-        return;
+    if pneumonia_score >= 0.5:
 
-    }
+        result = "PNEUMONIA"
 
-    if (file.size > 10 * 1024 * 1024) {
+        description = (
+            "The model output is more consistent "
+            "with the PNEUMONIA class."
+        )
 
-        showError("Image size must be less than 10 MB.");
+    else:
 
-        return;
+        result = "NORMAL"
 
-    }
+        description = (
+            "The model output is more consistent "
+            "with the NORMAL class."
+        )
 
-    selectedFile = file;
-
-    const reader = new FileReader();
-
-    reader.onload = function (event) {
-
-        previewImage.src = event.target.result;
-
-        fileName.textContent = file.name;
-
-        uploadContent.classList.add("hidden");
-
-        previewContainer.classList.remove("hidden");
-
-        analyzeButton.disabled = false;
-
-    };
-
-    reader.readAsDataURL(file);
-
-}
-
-
-// ---------------------------------------
-// REMOVE IMAGE
-// ---------------------------------------
-
-removeImage.addEventListener("click", function () {
-
-    selectedFile = null;
-
-    imageInput.value = "";
-
-    previewImage.src = "";
-
-    previewContainer.classList.add("hidden");
-
-    uploadContent.classList.remove("hidden");
-
-    analyzeButton.disabled = true;
-
-    resultContent.classList.add("hidden");
-
-    emptyResult.classList.remove("hidden");
-
-    gradcamSection.classList.add("hidden");
-
-    errorMessage.classList.add("hidden");
-
-});
-
-
-// ---------------------------------------
-// DRAG AND DROP
-// ---------------------------------------
-
-dropArea.addEventListener("dragover", function (event) {
-
-    event.preventDefault();
-
-    dropArea.classList.add("dragover");
-
-});
-
-
-dropArea.addEventListener("dragleave", function () {
-
-    dropArea.classList.remove("dragover");
-
-});
-
-
-dropArea.addEventListener("drop", function (event) {
-
-    event.preventDefault();
-
-    dropArea.classList.remove("dragover");
-
-    const file = event.dataTransfer.files[0];
-
-    if (file) {
-
-        handleFile(file);
-
-    }
-
-});
-
-
-// ---------------------------------------
-// ANALYZE IMAGE
-// ---------------------------------------
-
-analyzeButton.addEventListener("click", async function () {
-
-    if (!selectedFile) {
-        showError("Please upload an image first.");
-        return;
-    }
-
-    analyzeButton.disabled = true;
-
-    loadingText.classList.remove("hidden");
-    errorMessage.classList.add("hidden");
-    gradcamSection.classList.add("hidden");
-
-    const formData = new FormData();
-
-    formData.append("image", selectedFile);
-
-    try {
-
-        const response = await fetch("/predict", {
-            method: "POST",
-            body: formData
-        });
-
-        // Read server response
-        const responseText = await response.text();
-
-        console.log("Server status:", response.status);
-        console.log("Server response:", responseText);
-
-        // Check empty response
-        if (!responseText) {
-            throw new Error(
-                "Server returned an empty response. Status: " + response.status
-            );
-        }
-
-        // Convert response into JSON
-        let data;
-
-        try {
-            data = JSON.parse(responseText);
-        } catch (error) {
-            throw new Error(
-                "Invalid server response. Check Render logs."
-            );
-        }
-
-        // Check server status
-        if (!response.ok) {
-            throw new Error(
-                data.error || "Prediction failed. Status: " + response.status
-            );
-        }
-
-        // Display prediction
-        displayResults(data);
-
-    } catch (error) {
-
-        console.error("Prediction Error:", error);
-
-        showError(error.message);
-
-    } finally {
-
-        analyzeButton.disabled = false;
-
-        loadingText.classList.add("hidden");
-
-    }
-
-});
-
-
-// ---------------------------------------
-// DISPLAY RESULTS
-// ---------------------------------------
-
-function displayResults(data) {
-
-    emptyResult.classList.add("hidden");
-
-    resultContent.classList.remove("hidden");
-
-
-    const prediction = data.prediction;
-
-    const normalScore = data.normal_score;
-
-    const pneumoniaScore = data.pneumonia_score;
-
-
-    document.getElementById("predictionText").textContent =
-        "MODEL CLASSIFICATION";
-
-
-    const resultStatus = document.getElementById("resultStatus");
-
-    const resultTitle = document.getElementById("resultTitle");
-
-    const resultDescription = document.getElementById("resultDescription");
-
-
-    resultTitle.textContent = prediction;
-
-    resultDescription.textContent = data.description;
-
-
-    if (prediction === "PNEUMONIA") {
-
-        resultStatus.classList.add("pneumonia");
-
-        resultTitle.style.color = "#d35e4e";
-
-    } else {
-
-        resultStatus.classList.remove("pneumonia");
-
-        resultTitle.style.color = "#248b69";
-
+    return {
+        "prediction": result,
+        "normal_score": round(normal_score * 100, 2),
+        "pneumonia_score": round(pneumonia_score * 100, 2),
+        "description": description
     }
 
 
-    // DISPLAY SCORES
+# --------------------------------------------------
+# FIND DENSENET BASE MODEL FOR GRAD-CAM
+# --------------------------------------------------
 
-    document.getElementById("normalScore").textContent =
-        normalScore + "%";
+def find_backbone():
 
+    for layer in model.layers:
 
-    document.getElementById("pneumoniaScore").textContent =
-        pneumoniaScore + "%";
+        if isinstance(layer, tf.keras.Model):
 
+            conv_layers = [
+                item for item in layer.layers
+                if isinstance(item, tf.keras.layers.Conv2D)
+            ]
 
-    // DISPLAY PROGRESS BARS
+            if conv_layers:
 
-    document.getElementById("normalBar").style.width =
-        normalScore + "%";
+                return layer, conv_layers[-1]
 
-
-    document.getElementById("pneumoniaBar").style.width =
-        pneumoniaScore + "%";
-
-
-    // DISPLAY GRAD-CAM
-
-    if (data.gradcam) {
-
-        gradcamImage.src =
-            "data:image/png;base64," + data.gradcam;
-
-        gradcamSection.classList.remove("hidden");
-
-    } else {
-
-        gradcamSection.classList.add("hidden");
-
-        if (data.gradcam_message) {
-
-            console.log(data.gradcam_message);
-
-        }
-
-    }
+    raise ValueError(
+        "Could not find a nested convolutional backbone."
+    )
 
 
-    // Scroll to result
+# --------------------------------------------------
+# GRAD-CAM HEATMAP
+# --------------------------------------------------
 
-    resultContent.scrollIntoView({
+def generate_gradcam(image_array):
 
-        behavior: "smooth",
+    backbone, last_conv_layer = find_backbone()
 
-        block: "center"
+    x = tf.convert_to_tensor(image_array)
 
-    });
+    for layer in model.layers:
 
-}
+        if layer is backbone:
+            break
+
+        if isinstance(layer, tf.keras.layers.InputLayer):
+            continue
+
+        x = layer(x, training=False)
+
+    grad_model = tf.keras.Model(
+        inputs=backbone.inputs,
+        outputs=[
+            last_conv_layer.output,
+            backbone.output
+        ]
+    )
+
+    following_layers = []
+
+    found_backbone = False
+
+    for layer in model.layers:
+
+        if layer is backbone:
+
+            found_backbone = True
+            continue
+
+        if found_backbone:
+
+            following_layers.append(layer)
+
+    with tf.GradientTape() as tape:
+
+        conv_outputs, backbone_output = grad_model(
+            x,
+            training=False
+        )
+
+        output = backbone_output
+
+        for layer in following_layers:
+
+            if isinstance(layer, tf.keras.layers.InputLayer):
+                continue
+
+            output = layer(
+                output,
+                training=False
+            )
+
+        if output.shape[-1] == 1:
+
+            class_score = output[:, 0]
+
+        else:
+
+            class_score = output[:, 1]
+
+    gradients = tape.gradient(
+        class_score,
+        conv_outputs
+    )
+
+    if gradients is None:
+
+        raise ValueError(
+            "Could not calculate Grad-CAM gradients."
+        )
+
+    pooled_gradients = tf.reduce_mean(
+        gradients,
+        axis=(0, 1, 2)
+    )
+
+    conv_outputs = conv_outputs[0]
+
+    heatmap = tf.reduce_sum(
+        conv_outputs * pooled_gradients,
+        axis=-1
+    )
+
+    heatmap = tf.maximum(
+        heatmap,
+        0
+    )
+
+    maximum = tf.reduce_max(heatmap)
+
+    heatmap = heatmap / (
+        maximum + tf.keras.backend.epsilon()
+    )
+
+    heatmap = heatmap.numpy()
+
+    heatmap = np.uint8(
+        255 * heatmap
+    )
+
+    heatmap_image = Image.fromarray(
+        heatmap
+    )
+
+    heatmap_image = heatmap_image.resize(
+        IMAGE_SIZE,
+        Image.Resampling.BILINEAR
+    )
+
+    import matplotlib
+
+    coloured = matplotlib.colormaps["jet"](
+        np.array(heatmap_image)
+    )
+
+    coloured = np.uint8(
+        coloured[:, :, :3] * 255
+    )
+
+    coloured_image = Image.fromarray(
+        coloured
+    )
+
+    original = Image.fromarray(
+        image_array[0].astype(np.uint8)
+    ).convert("RGB")
+
+    overlay = Image.blend(
+        original,
+        coloured_image,
+        alpha=0.40
+    )
+
+    buffer = io.BytesIO()
+
+    overlay.save(
+        buffer,
+        format="PNG"
+    )
+
+    encoded_image = base64.b64encode(
+        buffer.getvalue()
+    ).decode("utf-8")
+
+    return encoded_image
 
 
-// ---------------------------------------
-// ERROR MESSAGE
-// ---------------------------------------
+# --------------------------------------------------
+# HOME PAGE
+# --------------------------------------------------
 
-function showError(message) {
+@app.route("/")
+def home():
 
-    errorMessage.textContent = message;
+    return render_template("index.html")
 
-    errorMessage.classList.remove("hidden");
 
-}
+# --------------------------------------------------
+# PREDICTION API
+# --------------------------------------------------
+
+@app.route("/predict", methods=["POST"])
+def predict():
+
+    try:
+
+        if "image" not in request.files:
+
+            return jsonify({
+                "error": "Please upload a chest X-ray image."
+            }), 400
+
+        file = request.files["image"]
+
+        if file.filename == "":
+
+            return jsonify({
+                "error": "No image selected."
+            }), 400
+
+        image = Image.open(file.stream)
+
+        if image.format not in ["JPEG", "PNG"]:
+
+            return jsonify({
+                "error": "Please upload a JPG or PNG image."
+            }), 400
+
+        image.load()
+
+        image = image.convert("RGB")
+
+        image_array = preprocess_image(image)
+
+        result = get_prediction(image_array)
+
+        # GRAD-CAM
+
+        try:
+
+            gradcam_image = generate_gradcam(
+                image_array
+            )
+
+            result["gradcam"] = gradcam_image
+
+        except Exception as grad_error:
+
+            print("Grad-CAM Error:", grad_error)
+
+            result["gradcam"] = None
+
+            result["gradcam_message"] = (
+                "Grad-CAM could not be generated for this model."
+            )
+
+        return jsonify(result)
+
+    except UnidentifiedImageError:
+
+        return jsonify({
+            "error": "The uploaded file is not a valid image."
+        }), 400
+
+    except Exception as error:
+
+        print("Prediction Error:", error)
+
+        return jsonify({
+            "error": "Something went wrong while analysing the image."
+        }), 500
+
+
+# --------------------------------------------------
+# FILE SIZE ERROR
+# --------------------------------------------------
+
+@app.errorhandler(413)
+def file_too_large(error):
+
+    return jsonify({
+        "error": "Image is too large. Maximum size is 10 MB."
+    }), 413
+
+
+# --------------------------------------------------
+# RUN APPLICATION
+# --------------------------------------------------
+
+if __name__ == "__main__":
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=False
+    )
