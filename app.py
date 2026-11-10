@@ -1,9 +1,21 @@
 import os
+
+# Force TensorFlow to use CPU on Render
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import logging
 from io import BytesIO
 
 import numpy as np
 import tensorflow as tf
+
+# Disable GPU devices
+try:
+    tf.config.set_visible_devices([], "GPU")
+    print("TensorFlow configured to use CPU.")
+except Exception as e:
+    print("Device configuration:", e)
 
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, UnidentifiedImageError
@@ -50,7 +62,7 @@ def load_model():
     if model is not None:
         return model
 
-    app.logger.info("Downloading model from Hugging Face...")
+    app.logger.info("Starting Hugging Face model download...")
 
     model_path = hf_hub_download(
         repo_id=HF_REPO_ID,
@@ -58,26 +70,20 @@ def load_model():
         token=HF_TOKEN
     )
 
-    app.logger.info("Model downloaded successfully!")
+    app.logger.info("Model downloaded: %s", model_path)
 
-    app.logger.info("Loading TensorFlow model...")
+    app.logger.info("Starting TensorFlow model loading...")
 
     model = tf.keras.models.load_model(
         model_path,
         compile=False
     )
 
-    app.logger.info("Model loaded successfully!")
+    app.logger.info("MODEL LOADED SUCCESSFULLY!")
 
-    app.logger.info(
-        "Model input shape: %s",
-        model.input_shape
-    )
+    app.logger.info("Input shape: %s", model.input_shape)
 
-    app.logger.info(
-        "Model output shape: %s",
-        model.output_shape
-    )
+    app.logger.info("Output shape: %s", model.output_shape)
 
     return model
 
