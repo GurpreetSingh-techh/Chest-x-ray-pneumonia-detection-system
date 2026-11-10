@@ -1,185 +1,363 @@
 import os
+import logging
+from io import BytesIO
+
 import numpy as np
 import tensorflow as tf
 
-from flask import Flask, render_template, request, jsonify
-from PIL import Image
-from io import BytesIO
+from flask import Flask, request, jsonify, render_template
+from PIL import Image, UnidentifiedImageError
+from huggingface_hub import hf_hub_download
 
 
-# ---------------------------------------
-# Flask Application
-# ---------------------------------------
+# ==========================================
+# FLASK CONFIGURATION
+# ==========================================
 
 app = Flask(__name__)
 
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+logging.basicConfig(level=logging.INFO)
 
-from huggingface_hub import hf_hub_download
+# ==========================================
+# HUGGING FACE CONFIGURATION
+# ==========================================
 
-MODEL_PATH = hf_hub_download(
-    repo_id="GurpreetSingh21/x_ray_detection_system_model",
-    filename="pneumonia_densenet121.keras"
+HF_REPO_ID = "GurpreetSingh21/x_ray_detection_system_model"
 
+MODEL_FILENAME = "pneumonia_densenet121.keras"
 
-# ---------------------------------------
-# Load Trained Model
-# ---------------------------------------
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
-print("Loading Pneumonia Detection Model...")
+# ==========================================
+# MODEL CONFIGURATION
+# ==========================================
 
-model = tf.keras.models.load_model(
-    MODEL_PATH,
-    compile=False
-)
+IMAGE_SIZE = (224, 224)
 
-print("Model Loaded Successfully!")
+model = None
 
 
-# ---------------------------------------
-# Home Page
-# ---------------------------------------
+# ==========================================
+# LOAD MODEL FROM HUGGING FACE
+# ==========================================
+
+def load_model():
+
+    global model
+
+    if model is not None:
+        return model
+
+    app.logger.info("Downloading model from Hugging Face...")
+
+    model_path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename=MODEL_FILENAME,
+        token=HF_TOKEN
+    )
+
+    app.logger.info("Model downloaded successfully!")
+
+    app.logger.info("Loading TensorFlow model...")
+
+    model = tf.keras.models.load_model(
+        model_path,
+        compile=False
+    )
+
+    app.logger.info("Model loaded successfully!")
+
+    app.logger.info(
+        "Model input shape: %s",
+        model.input_shape
+    )
+
+    app.logger.info(
+        "Model output shape: %s",
+        model.output_shape
+    )
+
+    return model
+
+
+# ==========================================
+# IMAGE PREPROCESSING
+# ==========================================
+
+def preprocess_image(image_file):
+
+    image_bytes = image_file.read()
+
+    image = Image.open(
+        BytesIO(image_bytes)
+    )
+
+    image = image.convert("RGB")
+
+    image = image.resize(
+        IMAGE_SIZE,
+        Image.Resampling.BILINEAR
+    )
+
+    image_array = np.asarray(
+        image,
+        dtype=np.float32
+    )
+
+    image_array = np.expand_dims(
+        image_array,
+        axis=0
+    )
+
+    return image_array
+
+
+# ==========================================
+# MAKE PREDICTION
+# ==========================================
+
+def predict_image(image_array):
+
+    loaded_model = load_model()
+
+    prediction = loaded_model.predict(
+        image_array,
+        verbose=0
+    )
+
+    prediction = np.asarray(prediction)
+
+    # Binary classification output
+
+    if prediction.size == 1:
+
+        pneumonia_score = float(
+            prediction.reshape(-1)[0]
+        )
+
+        normal_score = 1.0 - pneumonia_score
+
+    # Two-class classification output
+
+    elif prediction.size == 2:
+
+        scores = prediction.reshape(-1)
+
+        normal_score = float(scores[0])
+
+        pneumonia_score = float(scores[1])
+
+    else:
+
+        raise ValueError(
+            f"Unexpected model output shape: {prediction.shape}"
+        )
+
+    # Validate scores
+
+    if not np.isfinite(normal_score) or not np.isfinite(pneumonia_score):
+        raise ValueError("Model returned invalid prediction scores.")
+
+    normal_score = float(
+        np.clip(normal_score, 0, 1)
+    )
+
+    pneumonia_score = float(
+        np.clip(pneumonia_score, 0, 1)
+    )
+
+    # Classification
+
+    if pneumonia_score >= 0.5:
+
+        result = "PNEUMONIA"
+
+        description = (
+            "The AI model detected image patterns "
+            "associated with pneumonia."
+        )
+
+    else:
+
+        result = "NORMAL"
+
+        description = (
+            "The AI model classified this image as normal."
+        )
+
+    return {
+
+        "prediction": result,
+
+        "normal_score": round(
+            normal_score * 100, 2
+        ),
+
+        "pneumonia_score": round(
+            pneumonia_score * 100, 2
+        ),
+
+        "description": description,
+
+        "gradcam": None
+
+    }
+
+
+# ==========================================
+# HOME PAGE
+# ==========================================
 
 @app.route("/")
 def home():
+
     return render_template("index.html")
 
 
-# ---------------------------------------
-# Image Prediction
-# ---------------------------------------
+# ==========================================
+# HEALTH CHECK
+# ==========================================
+
+@app.route("/health")
+def health():
+
+    try:
+
+        load_model()
+
+        return jsonify({
+
+            "status": "healthy",
+
+            "model": "loaded"
+
+        })
+
+    except Exception as error:
+
+        app.logger.exception(
+            "Health check failed"
+        )
+
+        return jsonify({
+
+            "status": "error",
+
+            "message": str(error)
+
+        }), 500
+
+
+# ==========================================
+# PREDICTION ROUTE
+# ==========================================
 
 @app.route("/predict", methods=["POST"])
 def predict():
 
     try:
 
+        app.logger.info(
+            "Prediction request received."
+        )
+
         if "image" not in request.files:
+
             return jsonify({
-                "error": "Please upload an X-ray image."
+
+                "error": "No image uploaded."
+
             }), 400
 
-        file = request.files["image"]
+        image_file = request.files["image"]
 
-        if file.filename == "":
+        if image_file.filename == "":
+
             return jsonify({
-                "error": "No image selected."
+
+                "error": "Please select an image."
+
             }), 400
 
-        # Read image
-        image = Image.open(
-            BytesIO(file.read())
-        ).convert("RGB")
+        extension = os.path.splitext(
+            image_file.filename
+        )[1].lower()
 
-        # Resize image
-        image = image.resize((224, 224))
+        if extension not in [
+            ".jpg",
+            ".jpeg",
+            ".png"
+        ]:
 
-        # Convert image into NumPy array
-        image_array = np.array(
-            image,
-            dtype=np.float32
+            return jsonify({
+
+                "error": "Only JPG, JPEG and PNG images are supported."
+
+            }), 400
+
+        # Process image
+
+        image_array = preprocess_image(
+            image_file
         )
 
-        # Add batch dimension
-        image_array = np.expand_dims(
-            image_array,
-            axis=0
+        app.logger.info(
+            "Image preprocessing completed."
         )
 
-        # Model prediction
-        prediction = model.predict(
-            image_array,
-            verbose=0
+        # Generate prediction
+
+        result = predict_image(
+            image_array
         )
 
-        prediction = np.array(prediction)
-
-        # Binary sigmoid model
-        if prediction.shape[-1] == 1:
-
-            pneumonia_score = float(
-                prediction.reshape(-1)[0]
-            )
-
-        # Two-class softmax model
-        else:
-
-            probabilities = prediction.reshape(-1)
-
-            pneumonia_score = float(
-                probabilities[1]
-            )
-
-        # Keep score within 0 and 1
-        pneumonia_score = max(
-            0.0,
-            min(1.0, pneumonia_score)
+        app.logger.info(
+            "Prediction completed: %s",
+            result["prediction"]
         )
 
-        normal_score = 1 - pneumonia_score
+        return jsonify(result), 200
 
-        # Classification
-        if pneumonia_score >= 0.5:
-
-            result = "PNEUMONIA"
-
-            description = (
-                "The model detected image patterns "
-                "that it associates with pneumonia."
-            )
-
-        else:
-
-            result = "NORMAL"
-
-            description = (
-                "The model classified this image "
-                "as NORMAL."
-            )
+    except UnidentifiedImageError:
 
         return jsonify({
 
-            "prediction": result,
+            "error": "Invalid image. Please upload a valid image."
 
-            "pneumonia_score": round(
-                pneumonia_score * 100, 2
-            ),
+        }), 400
 
-            "normal_score": round(
-                normal_score * 100, 2
-            ),
+    except Exception as error:
 
-            "description": description
-
-        })
-
-    except Exception as e:
-
-        print("Prediction Error:", str(e))
+        app.logger.exception(
+            "Prediction error"
+        )
 
         return jsonify({
-            "error": "Unable to process this image. "
-                     "Please try another image."
+
+            "error": str(error)
+
         }), 500
 
 
-# ---------------------------------------
-# File Size Error
-# ---------------------------------------
+# ==========================================
+# FILE SIZE ERROR
+# ==========================================
 
 @app.errorhandler(413)
 def file_too_large(error):
 
     return jsonify({
+
         "error": "Image is too large. Maximum size is 10 MB."
+
     }), 413
 
 
-# ---------------------------------------
-# Run Application
-# ---------------------------------------
+# ==========================================
+# RUN APPLICATION
+# ==========================================
 
 if __name__ == "__main__":
 
