@@ -1,61 +1,89 @@
 document.addEventListener("DOMContentLoaded", function () {
 
-    // ==========================================
-    // 1. GET HTML ELEMENTS
-    // ==========================================
+    // =====================================
+    // GET HTML ELEMENTS
+    // =====================================
 
     const imageInput = document.getElementById("imageInput");
-
     const dropArea = document.getElementById("dropArea");
-
     const browseButton = document.getElementById("browseButton");
-
     const uploadContent = document.getElementById("uploadContent");
-
     const previewContainer = document.getElementById("previewContainer");
-
     const previewImage = document.getElementById("previewImage");
-
     const fileName = document.getElementById("fileName");
-
     const removeImage = document.getElementById("removeImage");
 
     const analyzeButton = document.getElementById("analyzeButton");
-
     const loadingText = document.getElementById("loadingText");
-
     const errorMessage = document.getElementById("errorMessage");
 
     const emptyResult = document.getElementById("emptyResult");
-
     const resultContent = document.getElementById("resultContent");
 
-    const gradcamSection = document.getElementById("gradcamSection");
+    const predictionText = document.getElementById("predictionText");
+    const resultTitle = document.getElementById("resultTitle");
+    const resultDescription = document.getElementById("resultDescription");
 
+    const normalScore = document.getElementById("normalScore");
+    const pneumoniaScore = document.getElementById("pneumoniaScore");
+
+    const normalBar = document.getElementById("normalBar");
+    const pneumoniaBar = document.getElementById("pneumoniaBar");
+
+    const gradcamSection = document.getElementById("gradcamSection");
     const gradcamImage = document.getElementById("gradcamImage");
 
+    let selectedFile = null;
+    let previewURL = null;
 
-    // ==========================================
-    // 2. CHECK ELEMENTS
-    // ==========================================
 
-    if (!imageInput) {
-        console.error("ClarityX: imageInput not found.");
-        return;
+    // =====================================
+    // ERROR MESSAGE
+    // =====================================
+
+    function showError(message) {
+
+        errorMessage.textContent = message;
+        errorMessage.classList.remove("hidden");
+
+        console.error("ClarityX:", message);
     }
 
-    let selectedFile = null;
+
+    function clearError() {
+
+        errorMessage.textContent = "";
+        errorMessage.classList.add("hidden");
+
+    }
 
 
-    // ==========================================
-    // 3. FILE VALIDATION
-    // ==========================================
+    // =====================================
+    // RESET RESULTS
+    // =====================================
+
+    function resetResults() {
+
+        resultContent.classList.add("hidden");
+        emptyResult.classList.remove("hidden");
+
+        gradcamSection.classList.add("hidden");
+
+        gradcamImage.removeAttribute("src");
+
+        normalBar.style.width = "0%";
+        pneumoniaBar.style.width = "0%";
+
+    }
+
+
+    // =====================================
+    // IMAGE VALIDATION
+    // =====================================
 
     function validateFile(file) {
 
-        if (!file) {
-            return false;
-        }
+        if (!file) return false;
 
         const allowedTypes = [
             "image/jpeg",
@@ -71,7 +99,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
         if (file.size > 10 * 1024 * 1024) {
 
-            showError("Image size must be smaller than 10 MB.");
+            showError("Maximum image size is 10 MB.");
 
             return false;
         }
@@ -80,154 +108,56 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
 
-    // ==========================================
-    // 4. SHOW ERROR
-    // ==========================================
-
-    function showError(message) {
-
-        if (errorMessage) {
-
-            errorMessage.textContent = message;
-
-            errorMessage.style.display = "block";
-        }
-
-        console.error("ClarityX:", message);
-    }
-
-
-    // ==========================================
-    // 5. CLEAR ERROR
-    // ==========================================
-
-    function clearError() {
-
-        if (errorMessage) {
-
-            errorMessage.textContent = "";
-
-            errorMessage.style.display = "none";
-        }
-    }
-
-
-    // ==========================================
-    // 6. RESET RESULTS
-    // ==========================================
-
-    function resetResults() {
-
-        if (resultContent) {
-            resultContent.style.display = "none";
-        }
-
-        if (emptyResult) {
-            emptyResult.style.display = "block";
-        }
-
-        if (gradcamSection) {
-            gradcamSection.style.display = "none";
-        }
-
-        if (gradcamImage) {
-            gradcamImage.removeAttribute("src");
-        }
-    }
-
-
-    // ==========================================
-    // 7. DISPLAY IMAGE PREVIEW
-    // ==========================================
+    // =====================================
+    // DISPLAY IMAGE
+    // =====================================
 
     function displayImage(file) {
 
-        if (!validateFile(file)) {
-            return;
-        }
+        if (!validateFile(file)) return;
 
         selectedFile = file;
 
-        clearError();
+        imageInput.value = "";
 
+        clearError();
         resetResults();
 
-        const reader = new FileReader();
+        if (previewURL) {
+            URL.revokeObjectURL(previewURL);
+        }
 
-        reader.onload = function (event) {
+        previewURL = URL.createObjectURL(file);
 
-            if (previewImage) {
+        previewImage.src = previewURL;
 
-                previewImage.src = event.target.result;
+        previewContainer.classList.remove("hidden");
 
-                previewImage.style.display = "block";
-            }
+        uploadContent.classList.add("hidden");
 
-            if (previewContainer) {
+        fileName.textContent = file.name;
 
-                previewContainer.style.display = "block";
-            }
-
-            if (uploadContent) {
-
-                uploadContent.style.display = "none";
-            }
-
-            if (fileName) {
-
-                fileName.textContent = file.name;
-            }
-
-            if (analyzeButton) {
-
-                analyzeButton.disabled = false;
-            }
-
-        };
-
-        reader.onerror = function () {
-
-            showError("Unable to read this image. Please try another.");
-
-        };
-
-        reader.readAsDataURL(file);
+        analyzeButton.disabled = false;
 
     }
 
 
-    // ==========================================
-    // 8. BROWSE IMAGE BUTTON
-    // ==========================================
+    // =====================================
+    // BROWSE IMAGE
+    // =====================================
 
-    if (browseButton) {
+    browseButton.addEventListener("click", function (event) {
 
-        browseButton.addEventListener("click", function (event) {
+        event.preventDefault();
 
-            // Prevent accidental form submission.
+        imageInput.click();
 
-            event.preventDefault();
-
-            // If the browse button is a label connected
-            // to the input, let the browser handle it.
-
-            if (
-                browseButton.tagName.toLowerCase() === "label" &&
-                browseButton.htmlFor === "imageInput"
-            ) {
-                return;
-            }
-
-            imageInput.click();
-
-        });
-
-    }
+    });
 
 
-    // ==========================================
-    // 9. FILE INPUT CHANGE
-    // ==========================================
+    // =====================================
+    // IMAGE SELECTION
+    // =====================================
 
     imageInput.addEventListener("change", function () {
 
@@ -242,424 +172,294 @@ document.addEventListener("DOMContentLoaded", function () {
     });
 
 
-    // ==========================================
-    // 10. DRAG AND DROP
-    // ==========================================
+    // =====================================
+    // DRAG AND DROP
+    // =====================================
 
-    if (dropArea) {
+    dropArea.addEventListener("dragover", function (event) {
 
-        dropArea.addEventListener("dragover", function (event) {
+        event.preventDefault();
 
-            event.preventDefault();
+        dropArea.classList.add("drag-over");
 
-            dropArea.classList.add("drag-over");
-
-        });
+    });
 
 
-        dropArea.addEventListener("dragleave", function (event) {
+    dropArea.addEventListener("dragleave", function () {
 
-            event.preventDefault();
+        dropArea.classList.remove("drag-over");
 
-            dropArea.classList.remove("drag-over");
-
-        });
+    });
 
 
-        dropArea.addEventListener("drop", function (event) {
+    dropArea.addEventListener("drop", function (event) {
 
-            event.preventDefault();
+        event.preventDefault();
 
-            dropArea.classList.remove("drag-over");
+        dropArea.classList.remove("drag-over");
 
-            const file = event.dataTransfer.files[0];
+        const file = event.dataTransfer.files[0];
 
-            if (file) {
+        if (file) {
 
-                displayImage(file);
+            displayImage(file);
 
-            }
+        }
 
-        });
-
-
-        // Allow clicking the upload area.
-
-        dropArea.addEventListener("click", function (event) {
-
-            if (
-                event.target.closest("button") ||
-                event.target.closest("label") ||
-                event.target.closest("input")
-            ) {
-                return;
-            }
-
-            if (!selectedFile) {
-
-                imageInput.click();
-
-            }
-
-        });
-
-    }
+    });
 
 
-    // ==========================================
-    // 11. REMOVE IMAGE
-    // ==========================================
+    // =====================================
+    // CLICK UPLOAD AREA
+    // =====================================
 
-    if (removeImage) {
+    dropArea.addEventListener("click", function (event) {
 
-        removeImage.addEventListener("click", function (event) {
+        if (
+            event.target.closest("button") ||
+            event.target.closest("input")
+        ) {
+            return;
+        }
 
-            event.preventDefault();
+        if (!selectedFile) {
 
-            selectedFile = null;
+            imageInput.click();
 
-            imageInput.value = "";
+        }
 
-            if (previewImage) {
-
-                previewImage.removeAttribute("src");
-
-                previewImage.style.display = "none";
-            }
-
-            if (previewContainer) {
-
-                previewContainer.style.display = "none";
-            }
-
-            if (uploadContent) {
-
-                uploadContent.style.display = "block";
-            }
-
-            if (fileName) {
-
-                fileName.textContent = "";
-            }
-
-            if (analyzeButton) {
-
-                analyzeButton.disabled = true;
-            }
-
-            clearError();
-
-            resetResults();
-
-        });
-
-    }
+    });
 
 
-    // ==========================================
-    // 12. SHOW LOADING
-    // ==========================================
+    // =====================================
+    // REMOVE IMAGE
+    // =====================================
+
+    removeImage.addEventListener("click", function (event) {
+
+        event.preventDefault();
+
+        selectedFile = null;
+
+        imageInput.value = "";
+
+        previewImage.removeAttribute("src");
+
+        previewContainer.classList.add("hidden");
+
+        uploadContent.classList.remove("hidden");
+
+        fileName.textContent = "";
+
+        analyzeButton.disabled = true;
+
+        clearError();
+
+        resetResults();
+
+    });
+
+
+    // =====================================
+    // LOADING
+    // =====================================
 
     function showLoading() {
 
-        if (loadingText) {
+        loadingText.classList.remove("hidden");
 
-            loadingText.style.display = "block";
+        loadingText.textContent =
+            "Analyzing your X-ray. Please wait...";
 
-            loadingText.textContent =
-                "Analyzing your X-ray with AI. Please wait...";
+        analyzeButton.disabled = true;
 
-        }
-
-        if (analyzeButton) {
-
-            analyzeButton.disabled = true;
-
-            analyzeButton.textContent = "Analyzing...";
-
-        }
+        analyzeButton.textContent = "Analyzing...";
 
     }
 
-
-    // ==========================================
-    // 13. HIDE LOADING
-    // ==========================================
 
     function hideLoading() {
 
-        if (loadingText) {
+        loadingText.classList.add("hidden");
 
-            loadingText.style.display = "none";
+        analyzeButton.disabled = !selectedFile;
 
-        }
-
-        if (analyzeButton) {
-
-            analyzeButton.disabled = false;
-
-            analyzeButton.textContent = "Analyze X-ray";
-
-        }
+        analyzeButton.innerHTML =
+            'Analyze X-ray <span>→</span>';
 
     }
 
 
-    // ==========================================
-    // 14. DISPLAY PREDICTION
-    // ==========================================
+    // =====================================
+    // DISPLAY RESULTS
+    // =====================================
 
     function displayResults(data) {
 
-        // Prediction
+        predictionText.textContent = data.prediction;
 
-        const predictionElement =
-            document.getElementById("predictionText") ||
-            document.getElementById("predictionResult") ||
-            document.getElementById("resultPrediction");
+        resultTitle.textContent =
+            data.prediction === "PNEUMONIA"
+                ? "Pneumonia detected by the model"
+                : "Normal classification";
 
-        if (predictionElement) {
+        resultDescription.textContent =
+            data.description || "";
 
-            predictionElement.textContent = data.prediction;
 
+        // Scores
+
+        const normal = Number(data.normal_score);
+        const pneumonia = Number(data.pneumonia_score);
+
+        if (
+            !Number.isFinite(normal) ||
+            !Number.isFinite(pneumonia)
+        ) {
+            throw new Error("Invalid prediction scores received.");
         }
 
+        normalScore.textContent = normal + "%";
 
-        // Normal score
-
-        const normalElement =
-            document.getElementById("normalScore");
-
-        if (normalElement) {
-
-            normalElement.textContent =
-                data.normal_score + "%";
-
-        }
+        pneumoniaScore.textContent = pneumonia + "%";
 
 
-        // Pneumonia score
+        // Progress bars
 
-        const pneumoniaElement =
-            document.getElementById("pneumoniaScore");
+        normalBar.style.width = normal + "%";
 
-        if (pneumoniaElement) {
-
-            pneumoniaElement.textContent =
-                data.pneumonia_score + "%";
-
-        }
+        pneumoniaBar.style.width = pneumonia + "%";
 
 
-        // Description
+        // Show results by removing hidden class
 
-        const descriptionElement =
-            document.getElementById("description");
+        emptyResult.classList.add("hidden");
 
-        if (descriptionElement) {
-
-            descriptionElement.textContent =
-                data.description || "";
-
-        }
+        resultContent.classList.remove("hidden");
 
 
-        // Show results
+        // Grad-CAM
 
-        if (emptyResult) {
-
-            emptyResult.style.display = "none";
-
-        }
-
-        if (resultContent) {
-
-            resultContent.style.display = "block";
-
-        }
-
-
-        // ======================================
-        // GRAD-CAM DISPLAY
-        // ======================================
-
-        if (data.gradcam && gradcamImage && gradcamSection) {
+        if (data.gradcam) {
 
             let imageData = data.gradcam;
 
             if (!imageData.startsWith("data:image")) {
 
-                imageData = "data:image/png;base64," + imageData;
+                imageData =
+                    "data:image/png;base64," + imageData;
 
             }
 
             gradcamImage.src = imageData;
 
-            gradcamSection.style.display = "block";
+            gradcamSection.classList.remove("hidden");
 
         } else {
 
-            if (gradcamSection) {
-
-                gradcamSection.style.display = "none";
-
-            }
+            gradcamSection.classList.add("hidden");
 
         }
 
     }
 
 
-    // ==========================================
-    // 15. ANALYZE IMAGE
-    // ==========================================
+    // =====================================
+    // ANALYZE X-RAY
+    // =====================================
 
-    if (analyzeButton) {
+    analyzeButton.addEventListener("click", async function (event) {
 
-        analyzeButton.addEventListener("click", async function (event) {
+        event.preventDefault();
 
-            event.preventDefault();
+        clearError();
 
-            clearError();
+        if (!selectedFile) {
 
-            if (!selectedFile) {
+            showError("Please upload an X-ray image first.");
 
-                showError("Please upload an X-ray image first.");
+            return;
+        }
 
-                return;
+        showLoading();
 
-            }
+        resetResults();
 
+        const formData = new FormData();
 
-            // Show loading
-
-            showLoading();
-
-            resetResults();
+        formData.append("image", selectedFile);
 
 
-            // Create FormData
+        try {
 
-            const formData = new FormData();
+            console.log("Sending image to Flask...");
 
-            formData.append("image", selectedFile);
+            const response = await fetch("/predict", {
 
+                method: "POST",
 
-            try {
+                body: formData,
 
-                console.log("Sending image to Flask...");
+                signal: AbortSignal.timeout(240000)
 
-
-                // Send image to Flask backend
-
-                const response = await fetch("/predict", {
-
-                    method: "POST",
-
-                    body: formData,
-
-                    signal: AbortSignal.timeout(180000)
-
-                });
+            });
 
 
-                console.log("Server response:", response.status);
+            const data = await response.json();
+
+            console.log("Flask response:", data);
 
 
-                // Read response
+            if (!response.ok) {
 
-                const responseText = await response.text();
-
-                if (!responseText) {
-
-                    throw new Error(
-                        "The server returned an empty response."
-                    );
-
-                }
-
-                let data;
-
-                try {
-
-                    data = JSON.parse(responseText);
-
-                } catch (parseError) {
-
-                    console.error("Invalid server response:", responseText);
-
-                    throw new Error(
-                        "The server returned an invalid response."
-                    );
-
-                }
-
-
-                // Check backend errors
-
-                if (!response.ok) {
-
-                    throw new Error(
-                        data.error || "Prediction failed."
-                    );
-
-                }
-
-
-                if (!data.prediction) {
-
-                    throw new Error(
-                        "Prediction result was not received."
-                    );
-
-                }
-
-
-                // Display prediction
-
-                displayResults(data);
-
-                console.log("Prediction:", data.prediction);
-
-
-            }
-
-            catch (error) {
-
-                console.error("ClarityX prediction error:", error);
-
-                showError(
-                    error.message || "Unable to analyze the image."
+                throw new Error(
+                    data.error || "Prediction failed."
                 );
 
             }
 
-            finally {
 
-                hideLoading();
+            if (!data.prediction) {
+
+                throw new Error(
+                    "No prediction was received."
+                );
 
             }
 
-        });
 
-    }
+            displayResults(data);
+
+            console.log(
+                "ClarityX prediction:",
+                data.prediction
+            );
 
 
-    // ==========================================
-    // 16. INITIAL WEBSITE STATE
-    // ==========================================
+        } catch (error) {
 
-    if (analyzeButton) {
+            console.error("Prediction error:", error);
 
-        analyzeButton.disabled = !selectedFile;
+            showError(
+                error.message || "Unable to analyze the image."
+            );
 
-    }
+        } finally {
 
-    if (loadingText) {
+            hideLoading();
 
-        loadingText.style.display = "none";
+        }
 
-    }
+    });
+
+
+    // =====================================
+    // INITIAL STATE
+    // =====================================
+
+    analyzeButton.disabled = true;
+
+    loadingText.classList.add("hidden");
 
     clearError();
 
