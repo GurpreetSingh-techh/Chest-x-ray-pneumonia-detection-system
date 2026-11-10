@@ -17,9 +17,11 @@ app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MODEL_PATH = os.path.join(
-    BASE_DIR,
-    "pneumonia_densenet121.keras"
+from huggingface_hub import hf_hub_download
+
+MODEL_PATH = hf_hub_download(
+    repo_id="GurpreetSingh21/x_ray_detection_system_model",
+    filename="pneumonia_densenet121.keras"
 )
 
 IMAGE_SIZE = (224, 224)
