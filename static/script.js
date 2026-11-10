@@ -1,331 +1,258 @@
-const imageInput = document.getElementById("imageInput");
+document.addEventListener("DOMContentLoaded", function () {
 
-const browseButton = document.getElementById("browseButton");
+    // =================================
+    // GET HTML ELEMENTS
+    // =================================
 
-const uploadArea = document.getElementById("uploadArea");
+    const imageInput = document.getElementById("imageInput");
 
-const previewContainer = document.getElementById("previewContainer");
+    const previewImage = document.getElementById("previewImage");
 
-const previewImage = document.getElementById("previewImage");
+    const analyzeBtn = document.getElementById("analyzeBtn");
 
-const removeButton = document.getElementById("removeButton");
+    const statusMessage = document.getElementById("statusMessage");
 
-const analyzeButton = document.getElementById("analyzeButton");
+    const resultSection = document.getElementById("resultSection");
 
-const loading = document.getElementById("loading");
+    const predictionText = document.getElementById("predictionText");
 
-const resultBox = document.getElementById("resultBox");
+    const normalScore = document.getElementById("normalScore");
 
-const errorBox = document.getElementById("errorBox");
+    const pneumoniaScore = document.getElementById("pneumoniaScore");
 
-let selectedFile = null;
-
-
-// ----------------------------------
-// Browse Image
-// ----------------------------------
-
-browseButton.addEventListener("click", () => {
-
-    imageInput.click();
-
-});
+    const description = document.getElementById("description");
 
 
-// ----------------------------------
-// Select Image
-// ----------------------------------
+    // =================================
+    // CHECK HTML ELEMENTS
+    // =================================
 
-imageInput.addEventListener("change", function () {
+    if (
+        !imageInput ||
+        !analyzeBtn ||
+        !statusMessage ||
+        !resultSection
+    ) {
 
-    const file = this.files[0];
-
-    if (file) {
-
-        handleFile(file);
-
-    }
-
-});
-
-
-// ----------------------------------
-// Handle Selected Image
-// ----------------------------------
-
-function handleFile(file) {
-
-    hideMessages();
-
-    if (!file.type.startsWith("image/")) {
-
-        showError("Please select a valid image.");
+        console.error(
+            "ClarityX: Required HTML elements are missing."
+        );
 
         return;
-
     }
 
-    if (file.size > 10 * 1024 * 1024) {
 
-        showError("Image size must be less than 10 MB.");
+    // =================================
+    // IMAGE PREVIEW
+    // =================================
 
-        return;
+    imageInput.addEventListener("change", function () {
 
-    }
+        const file = imageInput.files[0];
 
-    selectedFile = file;
+        if (!file) {
+            return;
+        }
 
-    const reader = new FileReader();
+        if (!["image/jpeg", "image/png"].includes(file.type)) {
 
-    reader.onload = function (event) {
+            statusMessage.textContent =
+                "Please upload a JPG or PNG image.";
 
-        previewImage.src = event.target.result;
+            imageInput.value = "";
 
-        previewContainer.style.display = "block";
+            return;
+        }
 
-        analyzeButton.disabled = false;
+        if (file.size > 10 * 1024 * 1024) {
 
-        uploadArea.style.display = "none";
+            statusMessage.textContent =
+                "Image must be smaller than 10 MB.";
 
-    };
+            imageInput.value = "";
 
-    reader.readAsDataURL(file);
+            return;
+        }
 
-}
+        const imageURL = URL.createObjectURL(file);
 
+        if (previewImage) {
 
-// ----------------------------------
-// Drag and Drop
-// ----------------------------------
+            previewImage.src = imageURL;
 
-uploadArea.addEventListener("dragover", function (event) {
+            previewImage.style.display = "block";
 
-    event.preventDefault();
+        }
 
-    uploadArea.classList.add("dragover");
+        resultSection.style.display = "none";
 
-});
+        statusMessage.textContent =
+            "Image uploaded successfully. Ready for analysis.";
 
-
-uploadArea.addEventListener("dragleave", function () {
-
-    uploadArea.classList.remove("dragover");
-
-});
-
-
-uploadArea.addEventListener("drop", function (event) {
-
-    event.preventDefault();
-
-    uploadArea.classList.remove("dragover");
-
-    const file = event.dataTransfer.files[0];
-
-    if (file) {
-
-        handleFile(file);
-
-    }
-
-});
+    });
 
 
-// ----------------------------------
-// Remove Image
-// ----------------------------------
+    // =================================
+    // ANALYZE IMAGE
+    // =================================
 
-removeButton.addEventListener("click", resetPage);
+    analyzeBtn.addEventListener("click", async function () {
 
+        const file = imageInput.files[0];
 
-// ----------------------------------
-// Analyze Image
-// ----------------------------------
+        if (!file) {
 
-analyzeButton.addEventListener("click", async function () {
-
-    if (!selectedFile) {
-
-        showError("Please select an X-ray image.");
-
-        return;
-
-    }
-
-    hideMessages();
-
-    analyzeButton.style.display = "none";
-
-    loading.style.display = "block";
-
-    const formData = new FormData();
-
-    formData.append("image", selectedFile);
-
-
-    try {
-
-        const response = await fetch("/predict", {
-
-            method: "POST",
-
-            body: formData
-
-        });
-
-        const data = await response.json();
-
-        loading.style.display = "none";
-
-        if (!response.ok) {
-
-            showError(data.error || "Prediction failed.");
-
-            analyzeButton.style.display = "block";
+            statusMessage.textContent =
+                "Please upload an X-ray image first.";
 
             return;
 
         }
 
-        showResult(data);
+        // Disable button
 
-    }
+        analyzeBtn.disabled = true;
 
-    catch (error) {
+        analyzeBtn.textContent = "Analyzing...";
 
-        loading.style.display = "none";
+        statusMessage.textContent =
+            "Connecting to AI model. Please wait...";
 
-        analyzeButton.style.display = "block";
+        resultSection.style.display = "none";
 
-        showError(
-            "Something went wrong. Please try again."
-        );
 
-        console.error(error);
+        // Create form data
 
-    }
+        const formData = new FormData();
+
+        formData.append("image", file);
+
+
+        try {
+
+            // Send image to Flask
+
+            statusMessage.textContent =
+                "Processing your X-ray image...";
+
+            const response = await fetch("/predict", {
+
+                method: "POST",
+
+                body: formData,
+
+                signal: AbortSignal.timeout(180000)
+
+            });
+
+
+            // Read response
+
+            const data = await response.json();
+
+
+            // Check server errors
+
+            if (!response.ok) {
+
+                throw new Error(
+                    data.error || "Prediction failed."
+                );
+
+            }
+
+
+            // =================================
+            // SHOW PREDICTION
+            // =================================
+
+            if (predictionText) {
+
+                predictionText.textContent =
+                    data.prediction;
+
+            }
+
+
+            // =================================
+            // SHOW NORMAL SCORE
+            // =================================
+
+            if (normalScore) {
+
+                normalScore.textContent =
+                    data.normal_score + "%";
+
+            }
+
+
+            // =================================
+            // SHOW PNEUMONIA SCORE
+            // =================================
+
+            if (pneumoniaScore) {
+
+                pneumoniaScore.textContent =
+                    data.pneumonia_score + "%";
+
+            }
+
+
+            // =================================
+            // SHOW DESCRIPTION
+            // =================================
+
+            if (description) {
+
+                description.textContent =
+                    data.description;
+
+            }
+
+
+            // =================================
+            // DISPLAY RESULT
+            // =================================
+
+            resultSection.style.display = "block";
+
+            statusMessage.textContent =
+                "Analysis completed successfully!";
+
+        }
+
+        catch (error) {
+
+            console.error(
+                "ClarityX Error:",
+                error
+            );
+
+            if (
+                error.name === "TimeoutError" ||
+                error.name === "AbortError"
+            ) {
+
+                statusMessage.textContent =
+                    "Request timed out. The server may be loading the AI model. Please try again.";
+
+            } else {
+
+                statusMessage.textContent =
+                    error.message || "Something went wrong.";
+
+            }
+
+        }
+
+        finally {
+
+            analyzeBtn.disabled = false;
+
+            analyzeBtn.textContent = "Analyze X-ray";
+
+        }
+
+    });
 
 });
-
-
-// ----------------------------------
-// Show Prediction Result
-// ----------------------------------
-
-function showResult(data) {
-
-    resultBox.style.display = "block";
-
-    const predictionText =
-        document.getElementById("predictionText");
-
-    const description =
-        document.getElementById("description");
-
-    const normalScore =
-        document.getElementById("normalScore");
-
-    const pneumoniaScore =
-        document.getElementById("pneumoniaScore");
-
-    const normalBar =
-        document.getElementById("normalBar");
-
-    const pneumoniaBar =
-        document.getElementById("pneumoniaBar");
-
-
-    predictionText.textContent = data.prediction;
-
-    predictionText.classList.remove("pneumonia");
-
-    if (data.prediction === "PNEUMONIA") {
-
-        predictionText.classList.add("pneumonia");
-
-    }
-
-    description.textContent = data.description;
-
-    normalScore.textContent =
-        data.normal_score + "%";
-
-    pneumoniaScore.textContent =
-        data.pneumonia_score + "%";
-
-
-    normalBar.style.width =
-        data.normal_score + "%";
-
-    pneumoniaBar.style.width =
-        data.pneumonia_score + "%";
-
-
-    resultBox.scrollIntoView({
-
-        behavior: "smooth",
-
-        block: "center"
-
-    });
-
-}
-
-
-// ----------------------------------
-// Show Error
-// ----------------------------------
-
-function showError(message) {
-
-    errorBox.textContent = message;
-
-    errorBox.style.display = "block";
-
-}
-
-
-// ----------------------------------
-// Hide Messages
-// ----------------------------------
-
-function hideMessages() {
-
-    errorBox.style.display = "none";
-
-    resultBox.style.display = "none";
-
-    loading.style.display = "none";
-
-}
-
-
-// ----------------------------------
-// Reset Page
-// ----------------------------------
-
-function resetPage() {
-
-    selectedFile = null;
-
-    imageInput.value = "";
-
-    previewImage.src = "";
-
-    previewContainer.style.display = "none";
-
-    uploadArea.style.display = "block";
-
-    analyzeButton.disabled = true;
-
-    analyzeButton.style.display = "block";
-
-    hideMessages();
-
-    document.getElementById("analyzer").scrollIntoView({
-
-        behavior: "smooth"
-
-    });
-
-}
