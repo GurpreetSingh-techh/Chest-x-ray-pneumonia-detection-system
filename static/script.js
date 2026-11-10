@@ -3,33 +3,19 @@
 // ---------------------------------------
 
 const imageInput = document.getElementById("imageInput");
-
 const dropArea = document.getElementById("dropArea");
-
 const browseButton = document.getElementById("browseButton");
-
 const uploadContent = document.getElementById("uploadContent");
-
 const previewContainer = document.getElementById("previewContainer");
-
 const previewImage = document.getElementById("previewImage");
-
 const fileName = document.getElementById("fileName");
-
 const removeImage = document.getElementById("removeImage");
-
 const analyzeButton = document.getElementById("analyzeButton");
-
 const loadingText = document.getElementById("loadingText");
-
 const errorMessage = document.getElementById("errorMessage");
-
 const emptyResult = document.getElementById("emptyResult");
-
 const resultContent = document.getElementById("resultContent");
-
 const gradcamSection = document.getElementById("gradcamSection");
-
 const gradcamImage = document.getElementById("gradcamImage");
 
 let selectedFile = null;
@@ -40,9 +26,7 @@ let selectedFile = null;
 // ---------------------------------------
 
 browseButton.addEventListener("click", function () {
-
     imageInput.click();
-
 });
 
 
@@ -51,15 +35,11 @@ browseButton.addEventListener("click", function () {
 // ---------------------------------------
 
 imageInput.addEventListener("change", function () {
-
     const file = imageInput.files[0];
 
     if (file) {
-
         handleFile(file);
-
     }
-
 });
 
 
@@ -71,25 +51,16 @@ function handleFile(file) {
 
     errorMessage.classList.add("hidden");
 
-    const allowedTypes = [
-        "image/jpeg",
-        "image/png"
-    ];
+    const allowedTypes = ["image/jpeg", "image/png"];
 
     if (!allowedTypes.includes(file.type)) {
-
         showError("Please select a JPG or PNG image.");
-
         return;
-
     }
 
     if (file.size > 10 * 1024 * 1024) {
-
         showError("Image size must be less than 10 MB.");
-
         return;
-
     }
 
     selectedFile = file;
@@ -99,19 +70,19 @@ function handleFile(file) {
     reader.onload = function (event) {
 
         previewImage.src = event.target.result;
-
         fileName.textContent = file.name;
 
         uploadContent.classList.add("hidden");
-
         previewContainer.classList.remove("hidden");
 
         analyzeButton.disabled = false;
 
+        resultContent.classList.add("hidden");
+        emptyResult.classList.remove("hidden");
+        gradcamSection.classList.add("hidden");
     };
 
     reader.readAsDataURL(file);
-
 }
 
 
@@ -122,25 +93,19 @@ function handleFile(file) {
 removeImage.addEventListener("click", function () {
 
     selectedFile = null;
-
     imageInput.value = "";
-
     previewImage.src = "";
 
     previewContainer.classList.add("hidden");
-
     uploadContent.classList.remove("hidden");
 
     analyzeButton.disabled = true;
 
     resultContent.classList.add("hidden");
-
     emptyResult.classList.remove("hidden");
 
     gradcamSection.classList.add("hidden");
-
     errorMessage.classList.add("hidden");
-
 });
 
 
@@ -151,18 +116,15 @@ removeImage.addEventListener("click", function () {
 dropArea.addEventListener("dragover", function (event) {
 
     event.preventDefault();
-
     dropArea.classList.add("dragover");
 
 });
-
 
 dropArea.addEventListener("dragleave", function () {
 
     dropArea.classList.remove("dragover");
 
 });
-
 
 dropArea.addEventListener("drop", function (event) {
 
@@ -173,9 +135,7 @@ dropArea.addEventListener("drop", function (event) {
     const file = event.dataTransfer.files[0];
 
     if (file) {
-
         handleFile(file);
-
     }
 
 });
@@ -188,60 +148,65 @@ dropArea.addEventListener("drop", function (event) {
 analyzeButton.addEventListener("click", async function () {
 
     if (!selectedFile) {
-
         showError("Please upload an image first.");
-
         return;
-
     }
 
     analyzeButton.disabled = true;
 
     loadingText.classList.remove("hidden");
-
     errorMessage.classList.add("hidden");
-
     gradcamSection.classList.add("hidden");
 
     const formData = new FormData();
 
     formData.append("image", selectedFile);
 
-
     try {
 
         const response = await fetch("/predict", {
-
             method: "POST",
-
             body: formData
-
         });
 
+        const responseText = await response.text();
 
-        const data = await response.json();
+        console.log("Server status:", response.status);
+        console.log("Server response:", responseText);
 
-
-        if (!response.ok) {
-
+        if (!responseText) {
             throw new Error(
-                data.error || "Prediction failed."
+                "Server returned an empty response. Status: " +
+                response.status
             );
-
         }
 
+        let data;
+
+        try {
+            data = JSON.parse(responseText);
+        } catch (error) {
+            throw new Error(
+                "Invalid server response. Please check server logs."
+            );
+        }
+
+        if (!response.ok) {
+            throw new Error(
+                data.error || "Prediction failed. Status: " + response.status
+            );
+        }
 
         displayResults(data);
 
-
     } catch (error) {
 
+        console.error("Prediction Error:", error);
         showError(error.message);
 
     } finally {
 
         analyzeButton.disabled = false;
-
         loadingText.classList.add("hidden");
 
     }
@@ -256,74 +221,55 @@ analyzeButton.addEventListener("click", async function () {
 function displayResults(data) {
 
     emptyResult.classList.add("hidden");
-
     resultContent.classList.remove("hidden");
 
-
     const prediction = data.prediction;
-
     const normalScore = data.normal_score;
-
     const pneumoniaScore = data.pneumonia_score;
-
 
     document.getElementById("predictionText").textContent =
         "MODEL CLASSIFICATION";
 
-
     const resultStatus = document.getElementById("resultStatus");
-
     const resultTitle = document.getElementById("resultTitle");
-
     const resultDescription = document.getElementById("resultDescription");
 
-
     resultTitle.textContent = prediction;
-
     resultDescription.textContent = data.description;
-
 
     if (prediction === "PNEUMONIA") {
 
         resultStatus.classList.add("pneumonia");
-
         resultTitle.style.color = "#d35e4e";
 
     } else {
 
         resultStatus.classList.remove("pneumonia");
-
         resultTitle.style.color = "#248b69";
 
     }
-
 
     // DISPLAY SCORES
 
     document.getElementById("normalScore").textContent =
         normalScore + "%";
 
-
     document.getElementById("pneumoniaScore").textContent =
         pneumoniaScore + "%";
-
 
     // DISPLAY PROGRESS BARS
 
     document.getElementById("normalBar").style.width =
         normalScore + "%";
 
-
     document.getElementById("pneumoniaBar").style.width =
         pneumoniaScore + "%";
-
 
     // DISPLAY GRAD-CAM
 
     if (data.gradcam) {
 
-        gradcamImage.src =
-            "data:image/png;base64," + data.gradcam;
+        gradcamImage.src = "data:image/png;base64," + data.gradcam;
 
         gradcamSection.classList.remove("hidden");
 
@@ -332,22 +278,16 @@ function displayResults(data) {
         gradcamSection.classList.add("hidden");
 
         if (data.gradcam_message) {
-
             console.log(data.gradcam_message);
-
         }
 
     }
 
-
-    // Scroll to result
+    // SCROLL TO RESULT
 
     resultContent.scrollIntoView({
-
         behavior: "smooth",
-
         block: "center"
-
     });
 
 }
@@ -360,7 +300,6 @@ function displayResults(data) {
 function showError(message) {
 
     errorMessage.textContent = message;
-
     errorMessage.classList.remove("hidden");
 
 }
