@@ -74,11 +74,27 @@ def load_model():
 
     app.logger.info("Starting TensorFlow model loading...")
 
+    app.logger.info("Beginning Keras model loading...")
+
+try:
+
     model = tf.keras.models.load_model(
         model_path,
         compile=False
     )
 
+    app.logger.info("MODEL LOADED SUCCESSFULLY!")
+
+    app.logger.info("Model input shape: %s", model.input_shape)
+
+    app.logger.info("Model output shape: %s", model.output_shape)
+
+except Exception:
+
+    app.logger.exception("MODEL LOADING FAILED")
+
+    raise
+    
     app.logger.info("MODEL LOADED SUCCESSFULLY!")
 
     app.logger.info("Input shape: %s", model.input_shape)
