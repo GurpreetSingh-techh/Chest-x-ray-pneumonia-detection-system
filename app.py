@@ -1,126 +1,61 @@
 import os
-
-# Force TensorFlow to use CPU on Render
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
-import logging
-from io import BytesIO
+import io
+import base64
 
 import numpy as np
 import tensorflow as tf
 
-# Disable GPU devices
-try:
-    tf.config.set_visible_devices([], "GPU")
-    print("TensorFlow configured to use CPU.")
-except Exception as e:
-    print("Device configuration:", e)
-
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, render_template, request, jsonify
 from PIL import Image, UnidentifiedImageError
 from huggingface_hub import hf_hub_download
 
 
-# ==========================================
+# --------------------------------------------------
 # FLASK CONFIGURATION
-# ==========================================
+# --------------------------------------------------
 
 app = Flask(__name__)
 
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
-logging.basicConfig(level=logging.INFO)
-
-# ==========================================
-# HUGGING FACE CONFIGURATION
-# ==========================================
-
-HF_REPO_ID = "GurpreetSingh21/x_ray_detection_system_model"
-
-MODEL_FILENAME = "pneumonia_densenet121.keras"
-
-HF_TOKEN = os.environ.get("HF_TOKEN")
-
-# ==========================================
-# MODEL CONFIGURATION
-# ==========================================
-
 IMAGE_SIZE = (224, 224)
 
-model = None
+
+# --------------------------------------------------
+# DOWNLOAD MODEL FROM HUGGING FACE
+# --------------------------------------------------
+
+MODEL_PATH = hf_hub_download(
+    repo_id="GurpreetSingh21/x_ray_detection_system_model",
+    filename="pneumonia_densenet121.keras"
+)
 
 
-# ==========================================
-# LOAD MODEL FROM HUGGING FACE
-# ==========================================
+# --------------------------------------------------
+# LOAD TRAINED MODEL
+# --------------------------------------------------
 
-def load_model():
+print("Loading Pneumonia Detection Model...")
 
-    global model
+model = tf.keras.models.load_model(
+    MODEL_PATH,
+    compile=False
+)
 
-    if model is not None:
-        return model
-
-    app.logger.info("Starting Hugging Face model download...")
-
-    model_path = hf_hub_download(
-        repo_id=HF_REPO_ID,
-        filename=MODEL_FILENAME,
-        token=HF_TOKEN
-    )
-
-    app.logger.info("Model downloaded: %s", model_path)
-
-    app.logger.info("Starting TensorFlow model loading...")
-
-    app.logger.info("Beginning Keras model loading...")
-
-try:
-
-    model = tf.keras.models.load_model(
-        model_path,
-        compile=False
-    )
-
-    app.logger.info("MODEL LOADED SUCCESSFULLY!")
-
-    app.logger.info("Model input shape: %s", model.input_shape)
-
-    app.logger.info("Model output shape: %s", model.output_shape)
-
-except Exception:
-
-    app.logger.exception("MODEL LOADING FAILED")
-
-    raise
-    
-    app.logger.info("MODEL LOADED SUCCESSFULLY!")
-
-    app.logger.info("Input shape: %s", model.input_shape)
-
-    app.logger.info("Output shape: %s", model.output_shape)
-
-    return model
+print("Model loaded successfully!")
 
 
-# ==========================================
+# --------------------------------------------------
 # IMAGE PREPROCESSING
-# ==========================================
+# --------------------------------------------------
 
-def preprocess_image(image_file):
-
-    image_bytes = image_file.read()
-
-    image = Image.open(
-        BytesIO(image_bytes)
-    )
+def preprocess_image(image):
 
     image = image.convert("RGB")
 
     image = image.resize(
         IMAGE_SIZE,
-        Image.Resampling.BILINEAR
+        Image.Resampling.LANCZOS
     )
 
     image_array = np.asarray(
@@ -136,40 +71,32 @@ def preprocess_image(image_file):
     return image_array
 
 
-# ==========================================
-# MAKE PREDICTION
-# ==========================================
+# --------------------------------------------------
+# MODEL PREDICTION
+# --------------------------------------------------
 
-def predict_image(image_array):
+def get_prediction(image_array):
 
-    loaded_model = load_model()
-
-    prediction = loaded_model.predict(
+    prediction = model.predict(
         image_array,
         verbose=0
     )
 
     prediction = np.asarray(prediction)
 
-    # Binary classification output
-
+    # Binary sigmoid output
     if prediction.size == 1:
 
         pneumonia_score = float(
             prediction.reshape(-1)[0]
         )
 
-        normal_score = 1.0 - pneumonia_score
+    # Two-class softmax output
+    elif prediction.ndim == 2 and prediction.shape[-1] == 2:
 
-    # Two-class classification output
-
-    elif prediction.size == 2:
-
-        scores = prediction.reshape(-1)
-
-        normal_score = float(scores[0])
-
-        pneumonia_score = float(scores[1])
+        pneumonia_score = float(
+            prediction[0][1]
+        )
 
     else:
 
@@ -177,28 +104,20 @@ def predict_image(image_array):
             f"Unexpected model output shape: {prediction.shape}"
         )
 
-    # Validate scores
-
-    if not np.isfinite(normal_score) or not np.isfinite(pneumonia_score):
-        raise ValueError("Model returned invalid prediction scores.")
-
-    normal_score = float(
-        np.clip(normal_score, 0, 1)
-    )
-
     pneumonia_score = float(
         np.clip(pneumonia_score, 0, 1)
     )
 
-    # Classification
+    normal_score = 1 - pneumonia_score
 
     if pneumonia_score >= 0.5:
 
         result = "PNEUMONIA"
 
         description = (
-            "The AI model detected image patterns "
-            "associated with pneumonia."
+            "The model output is more consistent with "
+            "the PNEUMONIA class. This is an educational "
+            "AI result, not a medical diagnosis."
         )
 
     else:
@@ -206,31 +125,218 @@ def predict_image(image_array):
         result = "NORMAL"
 
         description = (
-            "The AI model classified this image as normal."
+            "The model output is more consistent with "
+            "the NORMAL class. This is an educational "
+            "AI result, not a medical diagnosis."
         )
 
     return {
-
         "prediction": result,
-
-        "normal_score": round(
-            normal_score * 100, 2
-        ),
-
-        "pneumonia_score": round(
-            pneumonia_score * 100, 2
-        ),
-
-        "description": description,
-
-        "gradcam": None
-
+        "normal_score": round(normal_score * 100, 2),
+        "pneumonia_score": round(pneumonia_score * 100, 2),
+        "description": description
     }
 
 
-# ==========================================
+# --------------------------------------------------
+# FIND DENSENET BACKBONE FOR GRAD-CAM
+# --------------------------------------------------
+
+def find_backbone():
+
+    for layer in model.layers:
+
+        if isinstance(layer, tf.keras.Model):
+
+            conv_layers = [
+                item for item in layer.layers
+                if isinstance(item, tf.keras.layers.Conv2D)
+            ]
+
+            if conv_layers:
+
+                return layer, conv_layers[-1]
+
+    raise ValueError(
+        "No nested convolutional backbone found."
+    )
+
+
+# --------------------------------------------------
+# GENERATE GRAD-CAM
+# --------------------------------------------------
+
+def generate_gradcam(image_array):
+
+    backbone, last_conv_layer = find_backbone()
+
+    x = tf.convert_to_tensor(image_array)
+
+    # Process layers before the backbone
+    for layer in model.layers:
+
+        if layer is backbone:
+            break
+
+        if isinstance(layer, tf.keras.layers.InputLayer):
+            continue
+
+        x = layer(
+            x,
+            training=False
+        )
+
+    grad_model = tf.keras.Model(
+        inputs=backbone.inputs,
+        outputs=[
+            last_conv_layer.output,
+            backbone.output
+        ]
+    )
+
+    # Get layers after the backbone
+    following_layers = []
+
+    found_backbone = False
+
+    for layer in model.layers:
+
+        if layer is backbone:
+
+            found_backbone = True
+            continue
+
+        if found_backbone:
+
+            following_layers.append(layer)
+
+    with tf.GradientTape() as tape:
+
+        conv_outputs, backbone_output = grad_model(
+            x,
+            training=False
+        )
+
+        output = backbone_output
+
+        for layer in following_layers:
+
+            if isinstance(layer, tf.keras.layers.InputLayer):
+                continue
+
+            output = layer(
+                output,
+                training=False
+            )
+
+        if output.shape[-1] == 1:
+
+            class_score = output[:, 0]
+
+        elif output.shape[-1] == 2:
+
+            class_score = output[:, 1]
+
+        else:
+
+            raise ValueError(
+                "Unsupported model output shape."
+            )
+
+    gradients = tape.gradient(
+        class_score,
+        conv_outputs
+    )
+
+    if gradients is None:
+
+        raise ValueError(
+            "Could not calculate Grad-CAM gradients."
+        )
+
+    pooled_gradients = tf.reduce_mean(
+        gradients,
+        axis=(0, 1, 2)
+    )
+
+    conv_outputs = conv_outputs[0]
+
+    heatmap = tf.reduce_sum(
+        conv_outputs * pooled_gradients,
+        axis=-1
+    )
+
+    heatmap = tf.maximum(
+        heatmap,
+        0
+    )
+
+    maximum = tf.reduce_max(heatmap)
+
+    heatmap = heatmap / (
+        maximum + tf.keras.backend.epsilon()
+    )
+
+    heatmap = heatmap.numpy()
+
+    heatmap = np.uint8(
+        255 * heatmap
+    )
+
+    heatmap_image = Image.fromarray(
+        heatmap
+    )
+
+    heatmap_image = heatmap_image.resize(
+        IMAGE_SIZE,
+        Image.Resampling.BILINEAR
+    )
+
+    import matplotlib
+
+    coloured = matplotlib.colormaps["jet"](
+        np.asarray(heatmap_image)
+    )
+
+    coloured = np.uint8(
+        coloured[:, :, :3] * 255
+    )
+
+    coloured_image = Image.fromarray(
+        coloured
+    )
+
+    original = Image.fromarray(
+        np.clip(
+            image_array[0],
+            0,
+            255
+        ).astype(np.uint8)
+    ).convert("RGB")
+
+    overlay = Image.blend(
+        original,
+        coloured_image,
+        alpha=0.40
+    )
+
+    buffer = io.BytesIO()
+
+    overlay.save(
+        buffer,
+        format="PNG"
+    )
+
+    encoded_image = base64.b64encode(
+        buffer.getvalue()
+    ).decode("utf-8")
+
+    return encoded_image
+
+
+# --------------------------------------------------
 # HOME PAGE
-# ==========================================
+# --------------------------------------------------
 
 @app.route("/")
 def home():
@@ -238,153 +344,102 @@ def home():
     return render_template("index.html")
 
 
-# ==========================================
-# HEALTH CHECK
-# ==========================================
-
-@app.route("/health")
-def health():
-
-    try:
-
-        load_model()
-
-        return jsonify({
-
-            "status": "healthy",
-
-            "model": "loaded"
-
-        })
-
-    except Exception as error:
-
-        app.logger.exception(
-            "Health check failed"
-        )
-
-        return jsonify({
-
-            "status": "error",
-
-            "message": str(error)
-
-        }), 500
-
-
-# ==========================================
-# PREDICTION ROUTE
-# ==========================================
+# --------------------------------------------------
+# PREDICTION API
+# --------------------------------------------------
 
 @app.route("/predict", methods=["POST"])
 def predict():
 
     try:
 
-        app.logger.info(
-            "Prediction request received."
-        )
-
         if "image" not in request.files:
 
             return jsonify({
-
-                "error": "No image uploaded."
-
+                "error": "Please upload a chest X-ray image."
             }), 400
 
-        image_file = request.files["image"]
+        file = request.files["image"]
 
-        if image_file.filename == "":
+        if file.filename == "":
 
             return jsonify({
-
-                "error": "Please select an image."
-
+                "error": "No image selected."
             }), 400
 
-        extension = os.path.splitext(
-            image_file.filename
-        )[1].lower()
+        image = Image.open(file.stream)
 
-        if extension not in [
-            ".jpg",
-            ".jpeg",
-            ".png"
-        ]:
+        if image.format not in ("JPEG", "PNG"):
 
             return jsonify({
-
-                "error": "Only JPG, JPEG and PNG images are supported."
-
+                "error": "Please upload a JPG or PNG image."
             }), 400
 
-        # Process image
+        image.load()
 
-        image_array = preprocess_image(
-            image_file
-        )
+        image = image.convert("RGB")
 
-        app.logger.info(
-            "Image preprocessing completed."
-        )
+        image_array = preprocess_image(image)
 
-        # Generate prediction
+        result = get_prediction(image_array)
 
-        result = predict_image(
-            image_array
-        )
+        # Grad-CAM is optional.
+        # If it fails, prediction will still be returned.
 
-        app.logger.info(
-            "Prediction completed: %s",
-            result["prediction"]
-        )
+        try:
 
-        return jsonify(result), 200
+            result["gradcam"] = generate_gradcam(
+                image_array
+            )
+
+        except Exception as grad_error:
+
+            print("Grad-CAM Error:", repr(grad_error))
+
+            result["gradcam"] = None
+
+            result["gradcam_message"] = (
+                "Grad-CAM is unavailable for this model architecture."
+            )
+
+        return jsonify(result)
 
     except UnidentifiedImageError:
 
         return jsonify({
-
-            "error": "Invalid image. Please upload a valid image."
-
+            "error": "The uploaded file is not a valid image."
         }), 400
 
     except Exception as error:
 
-        app.logger.exception(
-            "Prediction error"
-        )
+        print("Prediction Error:", repr(error))
 
         return jsonify({
-
-            "error": str(error)
-
+            "error": "The server could not analyse this image. "
+                     "Please check the Render logs."
         }), 500
 
 
-# ==========================================
+# --------------------------------------------------
 # FILE SIZE ERROR
-# ==========================================
+# --------------------------------------------------
 
 @app.errorhandler(413)
 def file_too_large(error):
 
     return jsonify({
-
         "error": "Image is too large. Maximum size is 10 MB."
-
     }), 413
 
 
-# ==========================================
+# --------------------------------------------------
 # RUN APPLICATION
-# ==========================================
+# --------------------------------------------------
 
 if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=5000,
+        port=int(os.environ.get("PORT", 5000)),
         debug=False
     )
