@@ -1,441 +1,377 @@
-import os
-import io
-import base64
+// ---------------------------------------
+// GET HTML ELEMENTS
+// ---------------------------------------
 
-import numpy as np
-import tensorflow as tf
+const imageInput = document.getElementById("imageInput");
 
-from flask import Flask, render_template, request, jsonify
-from PIL import Image, UnidentifiedImageError
+const dropArea = document.getElementById("dropArea");
 
+const browseButton = document.getElementById("browseButton");
 
-# --------------------------------------------------
-# FLASK APP CONFIGURATION
-# --------------------------------------------------
+const uploadContent = document.getElementById("uploadContent");
 
-app = Flask(__name__)
+const previewContainer = document.getElementById("previewContainer");
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+const previewImage = document.getElementById("previewImage");
 
-from huggingface_hub import hf_hub_download
+const fileName = document.getElementById("fileName");
 
-MODEL_PATH = hf_hub_download(
-    repo_id="GurpreetSingh21/x_ray_detection_system_model",
-    filename="pneumonia_densenet121.keras"
-)
+const removeImage = document.getElementById("removeImage");
 
-IMAGE_SIZE = (224, 224)
+const analyzeButton = document.getElementById("analyzeButton");
 
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+const loadingText = document.getElementById("loadingText");
 
+const errorMessage = document.getElementById("errorMessage");
 
-# --------------------------------------------------
-# LOAD TRAINED MODEL
-# --------------------------------------------------
+const emptyResult = document.getElementById("emptyResult");
 
-print("Loading Pneumonia Detection Model...")
+const resultContent = document.getElementById("resultContent");
 
-model = tf.keras.models.load_model(
-    MODEL_PATH,
-    compile=False
-)
+const gradcamSection = document.getElementById("gradcamSection");
 
-print("Model loaded successfully!")
+const gradcamImage = document.getElementById("gradcamImage");
+
+let selectedFile = null;
 
 
-# --------------------------------------------------
-# IMAGE PREPROCESSING
-# --------------------------------------------------
+// ---------------------------------------
+// OPEN FILE BROWSER
+// ---------------------------------------
 
-def preprocess_image(image):
+browseButton.addEventListener("click", function () {
 
-    image = image.convert("RGB")
+    imageInput.click();
 
-    image = image.resize(
-        IMAGE_SIZE,
-        Image.Resampling.LANCZOS
-    )
-
-    image_array = np.array(
-        image,
-        dtype=np.float32
-    )
-
-    image_array = np.expand_dims(
-        image_array,
-        axis=0
-    )
-
-    return image_array
+});
 
 
-# --------------------------------------------------
-# MODEL PREDICTION
-# --------------------------------------------------
+// ---------------------------------------
+// IMAGE SELECTION
+// ---------------------------------------
 
-def get_prediction(image_array):
+imageInput.addEventListener("change", function () {
 
-    prediction = model.predict(
-        image_array,
-        verbose=0
-    )
+    const file = imageInput.files[0];
 
-    prediction = np.asarray(prediction)
+    if (file) {
 
-    # Binary sigmoid output
-    if prediction.size == 1:
+        handleFile(file);
 
-        pneumonia_score = float(
-            prediction.reshape(-1)[0]
-        )
+    }
 
-    # Two-class softmax output
-    elif prediction.shape[-1] == 2:
+});
 
-        pneumonia_score = float(
-            prediction.reshape(-1, 2)[0][1]
-        )
 
-    else:
+// ---------------------------------------
+// HANDLE IMAGE
+// ---------------------------------------
 
-        raise ValueError(
-            "Unexpected model output shape."
-        )
+function handleFile(file) {
 
-    pneumonia_score = float(
-        np.clip(pneumonia_score, 0, 1)
-    )
+    errorMessage.classList.add("hidden");
 
-    normal_score = 1 - pneumonia_score
+    const allowedTypes = [
+        "image/jpeg",
+        "image/png"
+    ];
 
-    if pneumonia_score >= 0.5:
+    if (!allowedTypes.includes(file.type)) {
 
-        result = "PNEUMONIA"
+        showError("Please select a JPG or PNG image.");
 
-        description = (
-            "The model output is more consistent "
-            "with the PNEUMONIA class."
-        )
+        return;
 
-    else:
+    }
 
-        result = "NORMAL"
+    if (file.size > 10 * 1024 * 1024) {
 
-        description = (
-            "The model output is more consistent "
-            "with the NORMAL class."
-        )
+        showError("Image size must be less than 10 MB.");
 
-    return {
-        "prediction": result,
-        "normal_score": round(normal_score * 100, 2),
-        "pneumonia_score": round(pneumonia_score * 100, 2),
-        "description": description
+        return;
+
+    }
+
+    selectedFile = file;
+
+    const reader = new FileReader();
+
+    reader.onload = function (event) {
+
+        previewImage.src = event.target.result;
+
+        fileName.textContent = file.name;
+
+        uploadContent.classList.add("hidden");
+
+        previewContainer.classList.remove("hidden");
+
+        analyzeButton.disabled = false;
+
+    };
+
+    reader.readAsDataURL(file);
+
+}
+
+
+// ---------------------------------------
+// REMOVE IMAGE
+// ---------------------------------------
+
+removeImage.addEventListener("click", function () {
+
+    selectedFile = null;
+
+    imageInput.value = "";
+
+    previewImage.src = "";
+
+    previewContainer.classList.add("hidden");
+
+    uploadContent.classList.remove("hidden");
+
+    analyzeButton.disabled = true;
+
+    resultContent.classList.add("hidden");
+
+    emptyResult.classList.remove("hidden");
+
+    gradcamSection.classList.add("hidden");
+
+    errorMessage.classList.add("hidden");
+
+});
+
+
+// ---------------------------------------
+// DRAG AND DROP
+// ---------------------------------------
+
+dropArea.addEventListener("dragover", function (event) {
+
+    event.preventDefault();
+
+    dropArea.classList.add("dragover");
+
+});
+
+
+dropArea.addEventListener("dragleave", function () {
+
+    dropArea.classList.remove("dragover");
+
+});
+
+
+dropArea.addEventListener("drop", function (event) {
+
+    event.preventDefault();
+
+    dropArea.classList.remove("dragover");
+
+    const file = event.dataTransfer.files[0];
+
+    if (file) {
+
+        handleFile(file);
+
+    }
+
+});
+
+
+// ---------------------------------------
+// ANALYZE IMAGE
+// ---------------------------------------
+
+analyzeButton.addEventListener("click", async function () {
+
+    if (!selectedFile) {
+        showError("Please upload an image first.");
+        return;
+    }
+
+    analyzeButton.disabled = true;
+
+    loadingText.classList.remove("hidden");
+    errorMessage.classList.add("hidden");
+    gradcamSection.classList.add("hidden");
+
+    const formData = new FormData();
+
+    formData.append("image", selectedFile);
+
+    try {
+
+        const response = await fetch("/predict", {
+            method: "POST",
+            body: formData
+        });
+
+        // Read server response
+        const responseText = await response.text();
+
+        console.log("Server status:", response.status);
+        console.log("Server response:", responseText);
+
+        // Check empty response
+        if (!responseText) {
+            throw new Error(
+                "Server returned an empty response. Status: " + response.status
+            );
+        }
+
+        // Convert response into JSON
+        let data;
+
+        try {
+            data = JSON.parse(responseText);
+        } catch (error) {
+            throw new Error(
+                "Invalid server response. Check Render logs."
+            );
+        }
+
+        // Check server status
+        if (!response.ok) {
+            throw new Error(
+                data.error || "Prediction failed. Status: " + response.status
+            );
+        }
+
+        // Display prediction
+        displayResults(data);
+
+    } catch (error) {
+
+        console.error("Prediction Error:", error);
+
+        showError(error.message);
+
+    } finally {
+
+        analyzeButton.disabled = false;
+
+        loadingText.classList.add("hidden");
+
+    }
+
+});
+
+
+// ---------------------------------------
+// DISPLAY RESULTS
+// ---------------------------------------
+
+function displayResults(data) {
+
+    emptyResult.classList.add("hidden");
+
+    resultContent.classList.remove("hidden");
+
+
+    const prediction = data.prediction;
+
+    const normalScore = data.normal_score;
+
+    const pneumoniaScore = data.pneumonia_score;
+
+
+    document.getElementById("predictionText").textContent =
+        "MODEL CLASSIFICATION";
+
+
+    const resultStatus = document.getElementById("resultStatus");
+
+    const resultTitle = document.getElementById("resultTitle");
+
+    const resultDescription = document.getElementById("resultDescription");
+
+
+    resultTitle.textContent = prediction;
+
+    resultDescription.textContent = data.description;
+
+
+    if (prediction === "PNEUMONIA") {
+
+        resultStatus.classList.add("pneumonia");
+
+        resultTitle.style.color = "#d35e4e";
+
+    } else {
+
+        resultStatus.classList.remove("pneumonia");
+
+        resultTitle.style.color = "#248b69";
+
     }
 
 
-# --------------------------------------------------
-# FIND DENSENET BASE MODEL FOR GRAD-CAM
-# --------------------------------------------------
+    // DISPLAY SCORES
 
-def find_backbone():
+    document.getElementById("normalScore").textContent =
+        normalScore + "%";
 
-    for layer in model.layers:
 
-        if isinstance(layer, tf.keras.Model):
+    document.getElementById("pneumoniaScore").textContent =
+        pneumoniaScore + "%";
 
-            conv_layers = [
-                item for item in layer.layers
-                if isinstance(item, tf.keras.layers.Conv2D)
-            ]
 
-            if conv_layers:
+    // DISPLAY PROGRESS BARS
 
-                return layer, conv_layers[-1]
+    document.getElementById("normalBar").style.width =
+        normalScore + "%";
 
-    raise ValueError(
-        "Could not find a nested convolutional backbone."
-    )
 
+    document.getElementById("pneumoniaBar").style.width =
+        pneumoniaScore + "%";
 
-# --------------------------------------------------
-# GRAD-CAM HEATMAP
-# --------------------------------------------------
 
-def generate_gradcam(image_array):
+    // DISPLAY GRAD-CAM
 
-    backbone, last_conv_layer = find_backbone()
+    if (data.gradcam) {
 
-    # Pass the image through layers before DenseNet.
-    x = tf.convert_to_tensor(image_array)
+        gradcamImage.src =
+            "data:image/png;base64," + data.gradcam;
 
-    for layer in model.layers:
+        gradcamSection.classList.remove("hidden");
 
-        if layer is backbone:
-            break
+    } else {
 
-        if isinstance(layer, tf.keras.layers.InputLayer):
-            continue
+        gradcamSection.classList.add("hidden");
 
-        x = layer(x, training=False)
+        if (data.gradcam_message) {
 
-    # Build a model that returns:
-    # 1. Last convolutional feature maps
-    # 2. Backbone output
+            console.log(data.gradcam_message);
 
-    grad_model = tf.keras.Model(
-        inputs=backbone.inputs,
-        outputs=[
-            last_conv_layer.output,
-            backbone.output
-        ]
-    )
+        }
 
-    # Pass backbone output through remaining layers.
-    following_layers = []
+    }
 
-    found_backbone = False
 
-    for layer in model.layers:
+    // Scroll to result
 
-        if layer is backbone:
+    resultContent.scrollIntoView({
 
-            found_backbone = True
-            continue
+        behavior: "smooth",
 
-        if found_backbone:
+        block: "center"
 
-            following_layers.append(layer)
+    });
 
-    with tf.GradientTape() as tape:
+}
 
-        conv_outputs, backbone_output = grad_model(
-            x,
-            training=False
-        )
 
-        output = backbone_output
+// ---------------------------------------
+// ERROR MESSAGE
+// ---------------------------------------
 
-        for layer in following_layers:
+function showError(message) {
 
-            if isinstance(layer, tf.keras.layers.InputLayer):
-                continue
+    errorMessage.textContent = message;
 
-            output = layer(
-                output,
-                training=False
-            )
+    errorMessage.classList.remove("hidden");
 
-        # Binary sigmoid or two-class softmax
-        if output.shape[-1] == 1:
-
-            class_score = output[:, 0]
-
-        else:
-
-            class_score = output[:, 1]
-
-    gradients = tape.gradient(
-        class_score,
-        conv_outputs
-    )
-
-    if gradients is None:
-
-        raise ValueError(
-            "Could not calculate Grad-CAM gradients."
-        )
-
-    # Average gradients across spatial dimensions.
-    pooled_gradients = tf.reduce_mean(
-        gradients,
-        axis=(0, 1, 2)
-    )
-
-    conv_outputs = conv_outputs[0]
-
-    heatmap = tf.reduce_sum(
-        conv_outputs * pooled_gradients,
-        axis=-1
-    )
-
-    heatmap = tf.maximum(
-        heatmap,
-        0
-    )
-
-    maximum = tf.reduce_max(heatmap)
-
-    heatmap = heatmap / (
-        maximum + tf.keras.backend.epsilon()
-    )
-
-    heatmap = heatmap.numpy()
-
-    # Convert heatmap to an image.
-    heatmap = np.uint8(
-        255 * heatmap
-    )
-
-    heatmap_image = Image.fromarray(
-        heatmap
-    )
-
-    heatmap_image = heatmap_image.resize(
-        IMAGE_SIZE,
-        Image.Resampling.BILINEAR
-    )
-
-    # Apply a colour map.
-    import matplotlib
-
-    coloured = matplotlib.colormaps["jet"](
-        np.array(heatmap_image)
-    )
-
-    coloured = np.uint8(
-        coloured[:, :, :3] * 255
-    )
-
-    coloured_image = Image.fromarray(
-        coloured
-    )
-
-    # Original X-ray image
-    original = Image.fromarray(
-        image_array[0].astype(np.uint8)
-    ).convert("RGB")
-
-    # Blend heatmap with original image.
-    overlay = Image.blend(
-        original,
-        coloured_image,
-        alpha=0.40
-    )
-
-    # Convert overlay into Base64.
-    buffer = io.BytesIO()
-
-    overlay.save(
-        buffer,
-        format="PNG"
-    )
-
-    encoded_image = base64.b64encode(
-        buffer.getvalue()
-    ).decode("utf-8")
-
-    return encoded_image
-
-
-# --------------------------------------------------
-# HOME PAGE
-# --------------------------------------------------
-
-@app.route("/")
-def home():
-
-    return render_template("index.html")
-
-
-# --------------------------------------------------
-# PREDICTION API
-# --------------------------------------------------
-
-@app.route("/predict", methods=["POST"])
-def predict():
-
-    try:
-
-        if "image" not in request.files:
-
-            return jsonify({
-                "error": "Please upload a chest X-ray image."
-            }), 400
-
-        file = request.files["image"]
-
-        if file.filename == "":
-
-            return jsonify({
-                "error": "No image selected."
-            }), 400
-
-        # Validate image format.
-        image = Image.open(file.stream)
-
-        if image.format not in ["JPEG", "PNG"]:
-
-            return jsonify({
-                "error": "Please upload a JPG or PNG image."
-            }), 400
-
-        image.load()
-
-        image = image.convert("RGB")
-
-        # Preprocess image.
-        image_array = preprocess_image(image)
-
-        # Prediction.
-        result = get_prediction(image_array)
-
-        # Grad-CAM.
-        try:
-
-            gradcam_image = generate_gradcam(
-                image_array
-            )
-
-            result["gradcam"] = gradcam_image
-
-        except Exception as grad_error:
-
-            print("Grad-CAM Error:", grad_error)
-
-            result["gradcam"] = None
-
-            result["gradcam_message"] = (
-                "Grad-CAM could not be generated for this model."
-            )
-
-        return jsonify(result)
-
-    except UnidentifiedImageError:
-
-        return jsonify({
-            "error": "The uploaded file is not a valid image."
-        }), 400
-
-    except Exception as error:
-
-        print("Prediction Error:", error)
-
-        return jsonify({
-            "error": "Something went wrong while analysing the image."
-        }), 500
-
-
-# --------------------------------------------------
-# FILE SIZE ERROR
-# --------------------------------------------------
-
-@app.errorhandler(413)
-def file_too_large(error):
-
-    return jsonify({
-        "error": "Image is too large. Maximum size is 10 MB."
-    }), 413
-
-
-# --------------------------------------------------
-# RUN APPLICATION
-# --------------------------------------------------
-
-if __name__ == "__main__":
-
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=False
-    )
+}
