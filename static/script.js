@@ -36,19 +36,6 @@ let selectedFile = null;
 
 
 // ---------------------------------------
-// SHOW ERROR
-// ---------------------------------------
-
-function showError(message) {
-
-    errorMessage.textContent = message;
-
-    errorMessage.classList.remove("hidden");
-
-}
-
-
-// ---------------------------------------
 // OPEN FILE BROWSER
 // ---------------------------------------
 
@@ -120,18 +107,6 @@ function handleFile(file) {
         previewContainer.classList.remove("hidden");
 
         analyzeButton.disabled = false;
-
-        resultContent.classList.add("hidden");
-
-        emptyResult.classList.remove("hidden");
-
-        gradcamSection.classList.add("hidden");
-
-    };
-
-    reader.onerror = function () {
-
-        showError("Could not read this image. Please try another file.");
 
     };
 
@@ -232,6 +207,7 @@ analyzeButton.addEventListener("click", async function () {
 
     formData.append("image", selectedFile);
 
+
     try {
 
         const response = await fetch("/predict", {
@@ -242,53 +218,25 @@ analyzeButton.addEventListener("click", async function () {
 
         });
 
-        const responseText = await response.text();
 
-        console.log("Server status:", response.status);
+        const data = await response.json();
 
-        console.log("Server response:", responseText);
-
-        if (!responseText) {
-
-            throw new Error(
-                "The server returned an empty response. Status: " +
-                response.status
-            );
-
-        }
-
-        let data;
-
-        try {
-
-            data = JSON.parse(responseText);
-
-        } catch (parseError) {
-
-            throw new Error(
-                "Invalid server response. Please check Render logs."
-            );
-
-        }
 
         if (!response.ok) {
 
             throw new Error(
-                data.error ||
-                "Prediction failed. Status: " + response.status
+                data.error || "Prediction failed."
             );
 
         }
 
+
         displayResults(data);
+
 
     } catch (error) {
 
-        console.error("Prediction Error:", error);
-
-        showError(
-            error.message || "Something went wrong. Please try again."
-        );
+        showError(error.message);
 
     } finally {
 
@@ -311,14 +259,17 @@ function displayResults(data) {
 
     resultContent.classList.remove("hidden");
 
+
     const prediction = data.prediction;
 
-    const normalScore = Number(data.normal_score);
+    const normalScore = data.normal_score;
 
-    const pneumoniaScore = Number(data.pneumonia_score);
+    const pneumoniaScore = data.pneumonia_score;
+
 
     document.getElementById("predictionText").textContent =
         "MODEL CLASSIFICATION";
+
 
     const resultStatus = document.getElementById("resultStatus");
 
@@ -326,9 +277,11 @@ function displayResults(data) {
 
     const resultDescription = document.getElementById("resultDescription");
 
+
     resultTitle.textContent = prediction;
 
-    resultDescription.textContent = data.description || "";
+    resultDescription.textContent = data.description;
+
 
     if (prediction === "PNEUMONIA") {
 
@@ -350,6 +303,7 @@ function displayResults(data) {
     document.getElementById("normalScore").textContent =
         normalScore + "%";
 
+
     document.getElementById("pneumoniaScore").textContent =
         pneumoniaScore + "%";
 
@@ -358,6 +312,7 @@ function displayResults(data) {
 
     document.getElementById("normalBar").style.width =
         normalScore + "%";
+
 
     document.getElementById("pneumoniaBar").style.width =
         pneumoniaScore + "%";
@@ -385,7 +340,7 @@ function displayResults(data) {
     }
 
 
-    // SCROLL TO RESULT
+    // Scroll to result
 
     resultContent.scrollIntoView({
 
@@ -394,5 +349,18 @@ function displayResults(data) {
         block: "center"
 
     });
+
+}
+
+
+// ---------------------------------------
+// ERROR MESSAGE
+// ---------------------------------------
+
+function showError(message) {
+
+    errorMessage.textContent = message;
+
+    errorMessage.classList.remove("hidden");
 
 }
