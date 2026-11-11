@@ -1,4 +1,9 @@
 import os
+
+# Reduce TensorFlow noise and memory use (must be BEFORE importing tensorflow)
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
 import io
 import base64
 
@@ -8,6 +13,10 @@ import tensorflow as tf
 from flask import Flask, render_template, request, jsonify
 from PIL import Image, UnidentifiedImageError
 from huggingface_hub import hf_hub_download
+
+# Use fewer CPU threads (small servers have very little CPU)
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
 
 
 # --------------------------------------------------
@@ -46,6 +55,121 @@ print("Model loaded successfully!")
 
 
 # --------------------------------------------------
+# BUILD ONE FAST FUNCTION: PREDICTION + GRAD-CAM
+# (built only ONCE when the server starts)
+# --------------------------------------------------
+
+def build_gradcam_function():
+
+    backbone = None
+    last_conv_layer = None
+
+    # Find the DenseNet backbone and its last Conv2D layer
+    for layer in model.layers:
+
+        if isinstance(layer, tf.keras.Model):
+
+            conv_layers = [
+                item for item in layer.layers
+                if isinstance(item, tf.keras.layers.Conv2D)
+            ]
+
+            if conv_layers:
+
+                backbone = layer
+                last_conv_layer = conv_layers[-1]
+                break
+
+    if backbone is None:
+
+        raise ValueError("No nested convolutional backbone found.")
+
+    # Split the layers into: before backbone / after backbone
+    layers_before = []
+    layers_after = []
+    found_backbone = False
+
+    for layer in model.layers:
+
+        if layer is backbone:
+
+            found_backbone = True
+            continue
+
+        if isinstance(layer, tf.keras.layers.InputLayer):
+            continue
+
+        if found_backbone:
+            layers_after.append(layer)
+        else:
+            layers_before.append(layer)
+
+    grad_model = tf.keras.Model(
+        inputs=backbone.inputs,
+        outputs=[
+            last_conv_layer.output,
+            backbone.output
+        ]
+    )
+
+    @tf.function(
+        input_signature=[
+            tf.TensorSpec(shape=(1, 224, 224, 3), dtype=tf.float32)
+        ]
+    )
+    def run(x):
+
+        h = x
+
+        for layer in layers_before:
+            h = layer(h, training=False)
+
+        with tf.GradientTape() as tape:
+
+            conv_outputs, h = grad_model(h, training=False)
+
+            for layer in layers_after:
+                h = layer(h, training=False)
+
+            if h.shape[-1] == 1:
+                class_score = h[:, 0]
+            elif h.shape[-1] == 2:
+                class_score = h[:, 1]
+            else:
+                raise ValueError("Unsupported model output shape.")
+
+        gradients = tape.gradient(class_score, conv_outputs)
+
+        return h, conv_outputs, gradients
+
+    return run
+
+
+gradcam_function = None
+
+try:
+
+    gradcam_function = build_gradcam_function()
+
+    # Warm-up: run once now, so the first user request is not slow
+    gradcam_function(tf.zeros((1, 224, 224, 3), dtype=tf.float32))
+
+    print("Grad-CAM function ready!")
+
+except Exception as setup_error:
+
+    print("Grad-CAM setup failed:", repr(setup_error))
+
+    gradcam_function = None
+
+    # Warm up normal prediction instead
+    model.predict(
+        np.zeros((1, 224, 224, 3), dtype=np.float32),
+        verbose=0
+    )
+
+
+# --------------------------------------------------
 # IMAGE PREPROCESSING
 # --------------------------------------------------
 
@@ -72,31 +196,22 @@ def preprocess_image(image):
 
 
 # --------------------------------------------------
-# MODEL PREDICTION
+# TURN MODEL OUTPUT INTO A RESULT
 # --------------------------------------------------
 
-def get_prediction(image_array):
-
-    prediction = model.predict(
-        image_array,
-        verbose=0
-    )
+def build_result(prediction):
 
     prediction = np.asarray(prediction)
 
     # Binary sigmoid output
     if prediction.size == 1:
 
-        pneumonia_score = float(
-            prediction.reshape(-1)[0]
-        )
+        pneumonia_score = float(prediction.reshape(-1)[0])
 
     # Two-class softmax output
     elif prediction.ndim == 2 and prediction.shape[-1] == 2:
 
-        pneumonia_score = float(
-            prediction[0][1]
-        )
+        pneumonia_score = float(prediction[0][1])
 
     else:
 
@@ -104,9 +219,7 @@ def get_prediction(image_array):
             f"Unexpected model output shape: {prediction.shape}"
         )
 
-    pneumonia_score = float(
-        np.clip(pneumonia_score, 0, 1)
-    )
+    pneumonia_score = float(np.clip(pneumonia_score, 0, 1))
 
     normal_score = 1 - pneumonia_score
 
@@ -139,179 +252,49 @@ def get_prediction(image_array):
 
 
 # --------------------------------------------------
-# FIND DENSENET BACKBONE FOR GRAD-CAM
+# GRAD-CAM HELPERS (no matplotlib needed)
 # --------------------------------------------------
 
-def find_backbone():
+def jet_colormap(values):
 
-    for layer in model.layers:
+    red = np.clip(1.5 - np.abs(4 * values - 3), 0, 1)
+    green = np.clip(1.5 - np.abs(4 * values - 2), 0, 1)
+    blue = np.clip(1.5 - np.abs(4 * values - 1), 0, 1)
 
-        if isinstance(layer, tf.keras.Model):
-
-            conv_layers = [
-                item for item in layer.layers
-                if isinstance(item, tf.keras.layers.Conv2D)
-            ]
-
-            if conv_layers:
-
-                return layer, conv_layers[-1]
-
-    raise ValueError(
-        "No nested convolutional backbone found."
-    )
+    return np.stack([red, green, blue], axis=-1)
 
 
-# --------------------------------------------------
-# GENERATE GRAD-CAM
-# --------------------------------------------------
+def make_gradcam_image(image_array, conv_outputs, gradients):
 
-def generate_gradcam(image_array):
+    conv_outputs = conv_outputs.numpy()[0]
 
-    backbone, last_conv_layer = find_backbone()
+    pooled_gradients = gradients.numpy().mean(axis=(0, 1, 2))
 
-    x = tf.convert_to_tensor(image_array)
-
-    # Process layers before the backbone
-    for layer in model.layers:
-
-        if layer is backbone:
-            break
-
-        if isinstance(layer, tf.keras.layers.InputLayer):
-            continue
-
-        x = layer(
-            x,
-            training=False
-        )
-
-    grad_model = tf.keras.Model(
-        inputs=backbone.inputs,
-        outputs=[
-            last_conv_layer.output,
-            backbone.output
-        ]
-    )
-
-    # Get layers after the backbone
-    following_layers = []
-
-    found_backbone = False
-
-    for layer in model.layers:
-
-        if layer is backbone:
-
-            found_backbone = True
-            continue
-
-        if found_backbone:
-
-            following_layers.append(layer)
-
-    with tf.GradientTape() as tape:
-
-        conv_outputs, backbone_output = grad_model(
-            x,
-            training=False
-        )
-
-        output = backbone_output
-
-        for layer in following_layers:
-
-            if isinstance(layer, tf.keras.layers.InputLayer):
-                continue
-
-            output = layer(
-                output,
-                training=False
-            )
-
-        if output.shape[-1] == 1:
-
-            class_score = output[:, 0]
-
-        elif output.shape[-1] == 2:
-
-            class_score = output[:, 1]
-
-        else:
-
-            raise ValueError(
-                "Unsupported model output shape."
-            )
-
-    gradients = tape.gradient(
-        class_score,
-        conv_outputs
-    )
-
-    if gradients is None:
-
-        raise ValueError(
-            "Could not calculate Grad-CAM gradients."
-        )
-
-    pooled_gradients = tf.reduce_mean(
-        gradients,
-        axis=(0, 1, 2)
-    )
-
-    conv_outputs = conv_outputs[0]
-
-    heatmap = tf.reduce_sum(
-        conv_outputs * pooled_gradients,
-        axis=-1
-    )
-
-    heatmap = tf.maximum(
-        heatmap,
+    heatmap = np.maximum(
+        (conv_outputs * pooled_gradients).sum(axis=-1),
         0
     )
 
-    maximum = tf.reduce_max(heatmap)
-
-    heatmap = heatmap / (
-        maximum + tf.keras.backend.epsilon()
-    )
-
-    heatmap = heatmap.numpy()
-
-    heatmap = np.uint8(
-        255 * heatmap
-    )
+    heatmap = heatmap / (heatmap.max() + 1e-8)
 
     heatmap_image = Image.fromarray(
-        heatmap
-    )
-
-    heatmap_image = heatmap_image.resize(
+        np.uint8(255 * heatmap)
+    ).resize(
         IMAGE_SIZE,
         Image.Resampling.BILINEAR
     )
 
-    import matplotlib
-
-    coloured = matplotlib.colormaps["jet"](
-        np.asarray(heatmap_image)
-    )
-
-    coloured = np.uint8(
-        coloured[:, :, :3] * 255
-    )
+    heat_values = np.asarray(
+        heatmap_image,
+        dtype=np.float32
+    ) / 255.0
 
     coloured_image = Image.fromarray(
-        coloured
+        np.uint8(jet_colormap(heat_values) * 255)
     )
 
     original = Image.fromarray(
-        np.clip(
-            image_array[0],
-            0,
-            255
-        ).astype(np.uint8)
+        np.clip(image_array[0], 0, 255).astype(np.uint8)
     ).convert("RGB")
 
     overlay = Image.blend(
@@ -322,16 +305,65 @@ def generate_gradcam(image_array):
 
     buffer = io.BytesIO()
 
-    overlay.save(
-        buffer,
-        format="PNG"
+    overlay.save(buffer, format="PNG")
+
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+# --------------------------------------------------
+# ANALYSE ONE IMAGE
+# --------------------------------------------------
+
+def analyse_image(image_array):
+
+    # Best path: one model pass gives prediction AND Grad-CAM
+    if gradcam_function is not None:
+
+        try:
+
+            output, conv_outputs, gradients = gradcam_function(
+                tf.constant(image_array)
+            )
+
+            result = build_result(output.numpy())
+
+            try:
+
+                if gradients is None:
+                    raise ValueError("No gradients returned.")
+
+                result["gradcam"] = make_gradcam_image(
+                    image_array,
+                    conv_outputs,
+                    gradients
+                )
+
+            except Exception as grad_error:
+
+                print("Grad-CAM Error:", repr(grad_error))
+
+                result["gradcam"] = None
+                result["gradcam_message"] = (
+                    "Grad-CAM is unavailable for this image."
+                )
+
+            return result
+
+        except Exception as fast_error:
+
+            print("Fast path failed:", repr(fast_error))
+
+    # Backup path: prediction only
+    prediction = model.predict(image_array, verbose=0)
+
+    result = build_result(prediction)
+
+    result["gradcam"] = None
+    result["gradcam_message"] = (
+        "Grad-CAM is unavailable for this model architecture."
     )
 
-    encoded_image = base64.b64encode(
-        buffer.getvalue()
-    ).decode("utf-8")
-
-    return encoded_image
+    return result
 
 
 # --------------------------------------------------
@@ -381,26 +413,7 @@ def predict():
 
         image_array = preprocess_image(image)
 
-        result = get_prediction(image_array)
-
-        # Grad-CAM is optional.
-        # If it fails, prediction will still be returned.
-
-        try:
-
-            result["gradcam"] = generate_gradcam(
-                image_array
-            )
-
-        except Exception as grad_error:
-
-            print("Grad-CAM Error:", repr(grad_error))
-
-            result["gradcam"] = None
-
-            result["gradcam_message"] = (
-                "Grad-CAM is unavailable for this model architecture."
-            )
+        result = analyse_image(image_array)
 
         return jsonify(result)
 
