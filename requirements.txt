@@ -1,7 +1,0 @@
-
-Flask==3.1.0
-tensorflow==2.20.0
-numpy
-Pillow
-gunicorn
-huggingface_hub
