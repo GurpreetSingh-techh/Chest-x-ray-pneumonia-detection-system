@@ -1,30 +1,33 @@
 import os
-import re
-import io
-import base64
-import uuid
-import json
-from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
+import io
+import re
+import json
+import base64
+import uuid
+from pathlib import Path
+
 import streamlit as st
 import streamlit.components.v1 as components
+
 import tensorflow as tf
 import numpy as np
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 
-# =====================================================
-# STREAMLIT CONFIGURATION
-# =====================================================
+# =========================================================
+# CONFIGURATION
+# =========================================================
 
 st.set_page_config(
-    page_title="ClarityX - Chest X-ray AI",
+    page_title="ClarityX | AI Chest X-Ray Analysis",
     page_icon="🩻",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -38,18 +41,18 @@ JS_PATH = BASE_DIR / "static" / "script.js"
 IMAGE_SIZE = (224, 224)
 
 
-# =====================================================
+# =========================================================
 # LOAD MODEL
-# =====================================================
+# =========================================================
 
 @st.cache_resource
 def load_model():
 
-    print("LOADING PNEUMONIA MODEL...")
+    print("Loading DenseNet121 model...")
 
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
-            f"Model not found: {MODEL_PATH}"
+            f"Model file not found: {MODEL_PATH}"
         )
 
     model = tf.keras.models.load_model(
@@ -57,89 +60,118 @@ def load_model():
         compile=False
     )
 
-    print("MODEL LOADED SUCCESSFULLY!")
-    print("MODEL INPUT:", model.input_shape)
-    print("MODEL OUTPUT:", model.output_shape)
+    print("MODEL LOADED SUCCESSFULLY")
+    print("INPUT SHAPE:", model.input_shape)
+    print("OUTPUT SHAPE:", model.output_shape)
 
     return model
 
 
-# =====================================================
-# BUILD GRAD-CAM MODEL
-# =====================================================
+# =========================================================
+# FIND DENSENET BACKBONE
+# =========================================================
 
-@st.cache_resource
-def build_gradcam_components():
+def find_backbone(model):
 
-    model = load_model()
-
-    print("BUILDING GRAD-CAM MODEL...")
-
-    # Find DenseNet121 backbone.
-    backbone = None
-
+    # First try the expected layer name.
     try:
+
         backbone = model.get_layer("densenet121")
+
+        print("FOUND BACKBONE: densenet121")
+
+        return backbone
+
     except ValueError:
         pass
 
-    # Fallback: search nested models.
-    if backbone is None:
+    # Otherwise search nested models.
+    for layer in model.layers:
 
-        candidates = [
-            layer for layer in model.layers
-            if isinstance(layer, tf.keras.Model)
-        ]
-
-        for candidate in candidates:
+        if isinstance(layer, tf.keras.Model):
 
             try:
-                candidate.get_layer("conv5_block16_concat")
-                backbone = candidate
-                break
+
+                layer.get_layer(
+                    "conv5_block16_concat"
+                )
+
+                print(
+                    "FOUND BACKBONE:",
+                    layer.name
+                )
+
+                return layer
 
             except ValueError:
                 continue
 
-    if backbone is None:
-        raise ValueError(
-            "DenseNet121 backbone was not found."
-        )
+    raise ValueError(
+        "DenseNet121 backbone not found. "
+        "Check model.summary() and nested layer names."
+    )
 
-    # Find the final convolutional feature layer.
-    last_conv_layer = backbone.get_layer(
+
+# =========================================================
+# BUILD GRAD-CAM MODEL
+# =========================================================
+
+@st.cache_resource
+def build_gradcam_model():
+
+    model = load_model()
+
+    backbone = find_backbone(model)
+
+    # Final DenseNet121 convolutional layer.
+    conv_layer = backbone.get_layer(
         "conv5_block16_concat"
     )
 
-    # Extract convolutional features and backbone output.
+    print(
+        "GRAD-CAM CONVOLUTIONAL LAYER:",
+        conv_layer.name
+    )
+
+    # Feature extractor.
     feature_extractor = tf.keras.Model(
         inputs=backbone.input,
         outputs=[
-            last_conv_layer.output,
+            conv_layer.output,
             backbone.output
-        ]
+        ],
+        name="gradcam_feature_extractor"
     )
 
-    # Find the backbone's position in the main model.
-    backbone_index = model.layers.index(backbone)
+    # Find backbone in the original model.
+    backbone_index = model.layers.index(
+        backbone
+    )
 
-    # Remaining classification layers.
-    classification_layers = model.layers[
+    # Classification head after DenseNet121.
+    classifier_layers = model.layers[
         backbone_index + 1:
     ]
 
-    print("GRAD-CAM LAYER:", last_conv_layer.name)
-    print("GRAD-CAM MODEL CREATED SUCCESSFULLY!")
+    if not classifier_layers:
 
-    return (
-        feature_extractor,
-        classification_layers
+        raise ValueError(
+            "Classification head was not found."
+        )
+
+    print(
+        "CLASSIFICATION HEAD:",
+        [layer.name for layer in classifier_layers]
     )
 
+    print("GRAD-CAM MODEL READY")
 
-# =====================================================
-# IMAGE PREPROCESSING
-# =====================================================
+    return feature_extractor, classifier_layers
+
+
+# =========================================================
+# PREPROCESS IMAGE
+# =========================================================
 
 def preprocess_image(image):
 
@@ -148,10 +180,11 @@ def preprocess_image(image):
     original_image = image.copy()
 
     resized_image = image.resize(
-        IMAGE_SIZE
+        IMAGE_SIZE,
+        Image.Resampling.BILINEAR
     )
 
-    image_array = np.array(
+    image_array = np.asarray(
         resized_image,
         dtype=np.float32
     )
@@ -161,7 +194,7 @@ def preprocess_image(image):
         axis=0
     )
 
-    # DenseNet121 preprocessing.
+    # Must match DenseNet121 training preprocessing.
     image_array = (
         tf.keras.applications.densenet.preprocess_input(
             image_array
@@ -171,19 +204,20 @@ def preprocess_image(image):
     return image_array, original_image
 
 
-# =====================================================
-# GRAD-CAM GENERATION
-# =====================================================
+# =========================================================
+# GRAD-CAM
+# =========================================================
 
-def generate_gradcam(image_array, predicted_class):
+def generate_gradcam(
+    image_array,
+    predicted_class
+):
 
-    model = load_model()
+    print("STARTING GRAD-CAM GENERATION")
 
-    feature_extractor, classification_layers = (
-        build_gradcam_components()
+    feature_extractor, classifier_layers = (
+        build_gradcam_model()
     )
-
-    print("GENERATING GRAD-CAM...")
 
     image_tensor = tf.convert_to_tensor(
         image_array,
@@ -192,8 +226,8 @@ def generate_gradcam(image_array, predicted_class):
 
     with tf.GradientTape() as tape:
 
-        # Extract feature maps.
-        conv_outputs, backbone_output = (
+        # Get convolutional feature maps.
+        conv_features, backbone_output = (
             feature_extractor(
                 image_tensor,
                 training=False
@@ -202,85 +236,93 @@ def generate_gradcam(image_array, predicted_class):
 
         x = backbone_output
 
-        # Pass through the original classifier layers.
-        for layer in classification_layers:
-
-            if isinstance(layer, tf.keras.layers.InputLayer):
-                continue
+        # Forward pass through classification head.
+        for layer in classifier_layers:
 
             x = layer(
                 x,
                 training=False
             )
 
-        predictions = x
-
-        # Binary sigmoid model:
-        # 0 = NORMAL
-        # 1 = PNEUMONIA
+        # Model has one sigmoid output.
+        pneumonia_score = x[:, 0]
 
         if predicted_class == "PNEUMONIA":
 
-            class_score = predictions[:, 0]
+            target_score = pneumonia_score
 
         else:
 
-            class_score = 1.0 - predictions[:, 0]
+            target_score = 1.0 - pneumonia_score
 
-    # Calculate gradients.
+    # Gradients with respect to convolutional features.
     gradients = tape.gradient(
-        class_score,
-        conv_outputs
+        target_score,
+        conv_features
     )
 
     if gradients is None:
-        raise ValueError(
-            "Gradients could not be calculated."
+
+        raise RuntimeError(
+            "Gradients are None. "
+            "Check the model architecture."
         )
 
-    # Global average pooling of gradients.
-    weights = tf.reduce_mean(
+    # Average gradients spatially.
+    channel_weights = tf.reduce_mean(
         gradients,
         axis=(1, 2)
     )
 
     # Remove batch dimension.
-    weights = weights[0]
+    channel_weights = channel_weights[0]
 
-    conv_outputs = conv_outputs[0]
+    conv_features = conv_features[0]
 
-    # Weighted combination of feature maps.
-    cam = tf.reduce_sum(
-        conv_outputs * weights,
+    # Weighted sum of feature maps.
+    heatmap = tf.reduce_sum(
+        conv_features * channel_weights,
         axis=-1
     )
 
-    # ReLU removes negative activations.
-    cam = tf.maximum(
-        cam,
+    # Keep positive activations.
+    heatmap = tf.maximum(
+        heatmap,
         0
     )
 
-    # Normalize heatmap.
-    max_value = tf.reduce_max(cam)
+    # Normalize.
+    maximum = tf.reduce_max(heatmap)
 
-    cam = tf.math.divide_no_nan(
-        cam,
-        max_value
+    heatmap = tf.math.divide_no_nan(
+        heatmap,
+        maximum
     )
 
-    heatmap = cam.numpy()
+    heatmap = heatmap.numpy()
 
-    print("GRAD-CAM GENERATED SUCCESSFULLY!")
+    if not np.isfinite(heatmap).all():
+
+        raise RuntimeError(
+            "Grad-CAM contains invalid values."
+        )
+
+    if float(np.max(heatmap)) <= 0:
+
+        raise RuntimeError(
+            "Grad-CAM is empty. No positive activation found."
+        )
+
+    print("GRAD-CAM GENERATED SUCCESSFULLY")
 
     return heatmap
 
 
-# =====================================================
-# CREATE GRAD-CAM OVERLAY
-# =====================================================
+# =========================================================
+# CREATE HEATMAP OVERLAY
+# =========================================================
 
-def create_gradcam_overlay(
+def create_gradcam_image(
     original_image,
     heatmap
 ):
@@ -291,11 +333,11 @@ def create_gradcam_overlay(
 
     import matplotlib.pyplot as plt
 
-    print("CREATING GRAD-CAM OVERLAY...")
-
-    # Resize heatmap to original image dimensions.
+    # Resize heatmap to original X-ray size.
     heatmap_image = Image.fromarray(
-        np.uint8(heatmap * 255)
+        np.uint8(
+            np.clip(heatmap, 0, 1) * 255
+        )
     )
 
     heatmap_image = heatmap_image.resize(
@@ -304,25 +346,27 @@ def create_gradcam_overlay(
     )
 
     heatmap_array = (
-        np.array(heatmap_image).astype(np.float32)
+        np.asarray(heatmap_image, dtype=np.float32)
         / 255.0
     )
 
-    # Apply JET color map.
-    colored_heatmap = plt.colormaps["jet"](
+    # JET colour map.
+    jet = plt.colormaps["jet"]
+
+    colored_heatmap = jet(
         heatmap_array
     )[:, :, :3]
 
-    colored_heatmap = np.uint8(
+    colored_heatmap = (
         colored_heatmap * 255
-    )
+    ).astype(np.uint8)
 
-    # Original X-ray.
-    original_array = np.array(
+    # Original image.
+    original_array = np.asarray(
         original_image.convert("RGB")
     )
 
-    # Blend original image and heatmap.
+    # Blend.
     overlay = (
         0.65 * original_array.astype(np.float32)
         +
@@ -339,167 +383,165 @@ def create_gradcam_overlay(
         overlay
     )
 
-    # Convert image to Base64.
     buffer = io.BytesIO()
 
     overlay_image.save(
         buffer,
-        format="PNG"
+        format="PNG",
+        optimize=True
     )
 
-    encoded_image = base64.b64encode(
+    encoded = base64.b64encode(
         buffer.getvalue()
     ).decode("utf-8")
 
-    print("GRAD-CAM OVERLAY CREATED!")
+    print("GRAD-CAM IMAGE CREATED")
 
-    return encoded_image
+    return encoded
 
 
-# =====================================================
-# PREDICTION FUNCTION
-# =====================================================
+# =========================================================
+# PREDICTION
+# =========================================================
 
-def predict_image(uploaded_image):
+def predict_image(image):
 
-    print("\nNEW REQUEST RECEIVED")
+    print("\nNEW IMAGE REQUEST")
+
+    image_array, original_image = preprocess_image(
+        image
+    )
+
+    model = load_model()
+
+    print("RUNNING MODEL PREDICTION")
+
+    raw_prediction = model(
+        image_array,
+        training=False
+    ).numpy()
+
+    pneumonia_probability = float(
+        raw_prediction.reshape(-1)[0]
+    )
+
+    pneumonia_probability = float(
+        np.clip(
+            pneumonia_probability,
+            0.0,
+            1.0
+        )
+    )
+
+    normal_probability = (
+        1.0 - pneumonia_probability
+    )
+
+    if pneumonia_probability >= 0.5:
+
+        predicted_class = "PNEUMONIA"
+
+    else:
+
+        predicted_class = "NORMAL"
+
+    print("PREDICTION:", predicted_class)
+
+    normal_score = round(
+        normal_probability * 100,
+        2
+    )
+
+    pneumonia_score = round(
+        pneumonia_probability * 100,
+        2
+    )
+
+    if predicted_class == "PNEUMONIA":
+
+        description = (
+            "The model identified patterns associated "
+            "with the Pneumonia class."
+        )
+
+    else:
+
+        description = (
+            "The model classified this image as Normal."
+        )
+
+    # Always try Grad-CAM.
+    gradcam_base64 = None
+
+    gradcam_message = None
 
     try:
 
-        # Preprocessing.
-        image_array, original_image = (
-            preprocess_image(uploaded_image)
-        )
-
-        print("IMAGE PREPROCESSING COMPLETED")
-
-        # Model prediction.
-        model = load_model()
-
-        print("PREDICTION STARTED")
-
-        prediction = model.predict(
+        heatmap = generate_gradcam(
             image_array,
-            verbose=0
+            predicted_class
         )
 
-        pneumonia_probability = float(
-            np.asarray(prediction).reshape(-1)[0]
+        gradcam_base64 = create_gradcam_image(
+            original_image,
+            heatmap
         )
 
-        print(
-            "PNEUMONIA PROBABILITY:",
-            pneumonia_probability
+        gradcam_message = (
+            "Grad-CAM generated successfully."
         )
 
-        # Classification.
-        if pneumonia_probability >= 0.5:
-
-            predicted_class = "PNEUMONIA"
-
-        else:
-
-            predicted_class = "NORMAL"
-
-        normal_score = (
-            1.0 - pneumonia_probability
-        ) * 100
-
-        pneumonia_score = (
-            pneumonia_probability * 100
-        )
-
-        print("PREDICTION:", predicted_class)
-
-        # Description.
-        if predicted_class == "PNEUMONIA":
-
-            description = (
-                "The AI model detected patterns "
-                "associated with pneumonia."
-            )
-
-        else:
-
-            description = (
-                "The AI model classified this image "
-                "as normal."
-            )
-
-        # Generate Grad-CAM.
-        gradcam_base64 = None
-
-        gradcam_message = None
-
-        try:
-
-            heatmap = generate_gradcam(
-                image_array,
-                predicted_class
-            )
-
-            gradcam_base64 = create_gradcam_overlay(
-                original_image,
-                heatmap
-            )
-
-            gradcam_message = (
-                "Grad-CAM visualization generated successfully."
-            )
-
-            print("GRAD-CAM AVAILABLE: True")
-
-        except Exception as grad_error:
-
-            print("GRAD-CAM GENERATION FAILED!")
-            print(str(grad_error))
-
-            gradcam_message = (
-                "Grad-CAM could not be generated: "
-                + str(grad_error)
-            )
-
-        # Response to existing JavaScript.
-        response = {
-
-            "prediction": predicted_class,
-
-            "normal_score": round(
-                normal_score,
-                2
-            ),
-
-            "pneumonia_score": round(
-                pneumonia_score,
-                2
-            ),
-
-            "description": description,
-
-            "gradcam": gradcam_base64,
-
-            "gradcam_message": gradcam_message
-
-        }
-
-        print("SENDING RESPONSE TO FRONTEND")
-
-        return response
+        print("GRAD-CAM AVAILABLE: TRUE")
 
     except Exception as error:
 
-        print("PREDICTION ERROR:", str(error))
+        gradcam_message = str(error)
 
-        return {
-            "error": str(error)
-        }
+        print("GRAD-CAM ERROR:", repr(error))
+
+    response = {
+
+        "prediction": predicted_class,
+
+        "normal_score": normal_score,
+
+        "pneumonia_score": pneumonia_score,
+
+        "description": description,
+
+        "gradcam": gradcam_base64,
+
+        "gradcam_message": gradcam_message
+
+    }
+
+    print(
+        "GRAD-CAM BASE64 LENGTH:",
+        len(gradcam_base64) if gradcam_base64 else 0
+    )
+
+    return response
 
 
-# =====================================================
-# READ ORIGINAL FRONTEND FILES
-# =====================================================
+# =========================================================
+# LOAD YOUR EXISTING FRONTEND
+# =========================================================
 
-def read_frontend():
+def load_frontend():
+
+    required_files = [
+        HTML_PATH,
+        CSS_PATH,
+        JS_PATH
+    ]
+
+    for file_path in required_files:
+
+        if not file_path.exists():
+
+            raise FileNotFoundError(
+                f"Frontend file missing: {file_path}"
+            )
 
     html = HTML_PATH.read_text(
         encoding="utf-8"
@@ -513,78 +555,83 @@ def read_frontend():
         encoding="utf-8"
     )
 
-    # Replace Flask static references.
+    # Remove original Flask stylesheet reference.
     html = re.sub(
-        r"""<link[^>]*href=["']\{\{\s*url_for\(['"]static['"],\s*filename=['"]style\.css['"]\)\s*\}\}["'][^>]*>""",
+        r'<link[^>]*href="\{\{\s*url_for\([\'"]static[\'"],\s*filename=[\'"]style\.css[\'"]\)\s*\}\}"[^>]*>',
         "",
         html
     )
 
+    # Remove original Flask JavaScript reference.
     html = re.sub(
-        r"""<script[^>]*src=["']\{\{\s*url_for\(['"]static['"],\s*filename=['"]script\.js['"][^)]*\)\s*\}\}["'][^>]*>\s*</script>""",
+        r'<script[^>]*src="\{\{\s*url_for\([\'"]static[\'"],\s*filename=[\'"]script\.js[\'"],\s*v=2\)\s*\}\}"[^>]*>\s*</script>',
         "",
         html
     )
 
-    # Insert original CSS and JavaScript.
+    # Insert CSS without modifying the CSS file.
     html = html.replace(
         "</head>",
-        "<style>" + css + "</style></head>"
+        "<style>\n" + css + "\n</style>\n</head>"
     )
 
+    # Insert your original JavaScript without modifying it.
     html = html.replace(
         "</body>",
-        "<script>" + js + "</script></body>"
+        "<script>\n" + js + "\n</script>\n</body>"
     )
 
     return html
 
 
-# =====================================================
-# STREAMLIT CUSTOM COMPONENT
-# =====================================================
+# =========================================================
+# STREAMLIT COMPONENT BRIDGE
+# =========================================================
 
-BRIDGE_DIR = BASE_DIR / ".xray_bridge"
+BRIDGE_DIR = BASE_DIR / ".clarityx_component"
 
 BRIDGE_DIR.mkdir(
     exist_ok=True
 )
 
-BRIDGE_HTML = BRIDGE_DIR / "index.html"
+BRIDGE_FILE = BRIDGE_DIR / "index.html"
 
 
-def create_bridge():
+def create_component_html():
 
-    frontend_html = read_frontend()
+    frontend = load_frontend()
 
-    bridge_script = r"""
+    bridge = r"""
+
 <script>
 
 let pendingRequest = null;
-let lastResponseId = null;
 
-function sendMessage(type, data = {}) {
 
-    window.parent.postMessage({
+// Streamlit component initialization.
+window.parent.postMessage({
 
-        isStreamlitMessage: true,
-        type: type,
-        ...data
+    isStreamlitMessage: true,
 
-    }, "*");
+    type: "streamlit:componentReady",
 
-}
-
-sendMessage("streamlit:componentReady", {
     apiVersion: 1
-});
 
-sendMessage("streamlit:setFrameHeight", {
-    height: 1000
-});
+}, "*");
 
 
-// Receive Python responses.
+window.parent.postMessage({
+
+    isStreamlitMessage: true,
+
+    type: "streamlit:setFrameHeight",
+
+    height: 2200
+
+}, "*");
+
+
+// Receive prediction result from Python.
 window.addEventListener("message", function(event) {
 
     const message = event.data;
@@ -595,18 +642,22 @@ window.addEventListener("message", function(event) {
 
     if (message.type === "streamlit:render") {
 
-        const response = message.args.response;
+        const args = message.args || {};
+
+        const response = args.response;
 
         if (
             response &&
             pendingRequest &&
-            response.request_id === pendingRequest.id
+            response.request_id === pendingRequest.request_id
         ) {
+
+            const result = response.data;
 
             pendingRequest.resolve(
 
                 new Response(
-                    JSON.stringify(response.data),
+                    JSON.stringify(result),
                     {
                         status: 200,
                         headers: {
@@ -619,8 +670,6 @@ window.addEventListener("message", function(event) {
 
             pendingRequest = null;
 
-            lastResponseId = response.request_id;
-
         }
 
     }
@@ -628,163 +677,169 @@ window.addEventListener("message", function(event) {
 });
 
 
-// Preserve the original frontend JavaScript.
+// Intercept the original JavaScript fetch request.
 const originalFetch = window.fetch.bind(window);
 
 window.fetch = async function(input, init = {}) {
 
-    const url = typeof input === "string"
+    const requestUrl = (
+        typeof input === "string"
         ? input
-        : input.url;
+        : input.url
+    );
 
-    if (
-        url &&
-        new URL(url, window.location.href).pathname === "/predict"
-    ) {
+    const pathname = new URL(
+        requestUrl,
+        window.location.href
+    ).pathname;
 
-        const formData = init.body;
+    if (pathname !== "/predict") {
 
-        if (!(formData instanceof FormData)) {
-            return originalFetch(input, init);
-        }
-
-        const file = formData.get("image");
-
-        if (!(file instanceof File)) {
-
-            return new Response(
-                JSON.stringify({
-                    error: "No image was uploaded."
-                }),
-                {
-                    status: 400,
-                    headers: {
-                        "Content-Type": "application/json"
-                    }
-                }
-            );
-
-        }
-
-        const requestId = crypto.randomUUID();
-
-        return new Promise((resolve) => {
-
-            pendingRequest = {
-                id: requestId,
-                resolve: resolve
-            };
-
-            const reader = new FileReader();
-
-            reader.onload = function() {
-
-                const base64Data = reader.result.split(",")[1];
-
-                sendMessage(
-                    "streamlit:setComponentValue",
-                    {
-                        value: {
-                            request_id: requestId,
-                            filename: file.name,
-                            image: base64Data
-                        }
-                    }
-                );
-
-            };
-
-            reader.onerror = function() {
-
-                pendingRequest = null;
-
-                resolve(
-                    new Response(
-                        JSON.stringify({
-                            error: "Could not read uploaded image."
-                        }),
-                        {
-                            status: 400,
-                            headers: {
-                                "Content-Type": "application/json"
-                            }
-                        }
-                    )
-                );
-
-            };
-
-            reader.readAsDataURL(file);
-
-        });
+        return originalFetch(input, init);
 
     }
 
-    return originalFetch(input, init);
+    const formData = init.body;
+
+    if (!(formData instanceof FormData)) {
+
+        return originalFetch(input, init);
+
+    }
+
+    const file = formData.get("image");
+
+    if (!(file instanceof File)) {
+
+        return new Response(
+            JSON.stringify({
+                error: "No image file received."
+            }),
+            {
+                status: 400,
+                headers: {
+                    "Content-Type": "application/json"
+                }
+            }
+        );
+
+    }
+
+    const requestId = (
+        window.crypto &&
+        window.crypto.randomUUID
+    )
+        ? window.crypto.randomUUID()
+        : String(Date.now()) + Math.random();
+
+
+    return new Promise(function(resolve, reject) {
+
+        pendingRequest = {
+
+            request_id: requestId,
+
+            resolve: resolve,
+
+            reject: reject
+
+        };
+
+
+        const reader = new FileReader();
+
+
+        reader.onload = function() {
+
+            const base64Image = reader.result.split(",")[1];
+
+
+            // Send image to Streamlit Python.
+            window.parent.postMessage({
+
+                isStreamlitMessage: true,
+
+                type: "streamlit:setComponentValue",
+
+                dataType: "json",
+
+                value: {
+
+                    request_id: requestId,
+
+                    filename: file.name,
+
+                    image: base64Image
+
+                }
+
+            }, "*");
+
+        };
+
+
+        reader.onerror = function() {
+
+            pendingRequest = null;
+
+            reject(
+                new Error("Unable to read selected image.")
+            );
+
+        };
+
+
+        reader.readAsDataURL(file);
+
+    });
 
 };
 
 </script>
+
 """
 
-    full_html = (
-        frontend_html
-        + bridge_script
-    )
-
-    BRIDGE_HTML.write_text(
-        full_html,
+    BRIDGE_FILE.write_text(
+        frontend + bridge,
         encoding="utf-8"
     )
 
 
-# =====================================================
+# =========================================================
 # DECLARE COMPONENT
-# =====================================================
+# =========================================================
 
-create_bridge()
+create_component_html()
 
-xray_component = components.declare_component(
-    "xray_bridge",
+clarityx_component = components.declare_component(
+    "clarityx_frontend",
     path=str(BRIDGE_DIR)
 )
 
 
-# =====================================================
-# STREAMLIT APPLICATION
-# =====================================================
+# =========================================================
+# STREAMLIT BACKEND
+# =========================================================
 
-st.title("ClarityX - Chest X-ray AI")
+if "clarityx_response" not in st.session_state:
 
-st.caption(
-    "AI-powered chest X-ray classification "
-    "with Grad-CAM visualization."
+    st.session_state.clarityx_response = None
+
+
+if "clarityx_processed" not in st.session_state:
+
+    st.session_state.clarityx_processed = set()
+
+
+# Render complete original webpage.
+component_value = clarityx_component(
+    response=st.session_state.clarityx_response,
+    key="clarityx_frontend_component"
 )
 
 
-if "bridge_response" not in st.session_state:
-
-    st.session_state.bridge_response = None
-
-
-if "processed_requests" not in st.session_state:
-
-    st.session_state.processed_requests = set()
-
-
-if "bridge_error" not in st.session_state:
-
-    st.session_state.bridge_error = None
-
-
-# Receive requests from frontend.
-component_value = xray_component(
-    response=st.session_state.bridge_response,
-    key="xray_frontend"
-)
-
-
-if component_value is not None:
+# Receive image request.
+if isinstance(component_value, dict):
 
     request_id = component_value.get(
         "request_id"
@@ -792,46 +847,53 @@ if component_value is not None:
 
     if (
         request_id
-        and request_id not in st.session_state.processed_requests
+        and request_id not in st.session_state.clarityx_processed
     ):
 
-        st.session_state.processed_requests.add(
+        st.session_state.clarityx_processed.add(
             request_id
         )
 
         try:
 
             image_bytes = base64.b64decode(
-                component_value["image"]
+                component_value["image"],
+                validate=True
             )
 
-            uploaded_image = Image.open(
+            if len(image_bytes) > 10 * 1024 * 1024:
+
+                raise ValueError(
+                    "Image must be smaller than 10 MB."
+                )
+
+            image = Image.open(
                 io.BytesIO(image_bytes)
             )
 
-            uploaded_image.verify()
+            image.verify()
 
-            uploaded_image = Image.open(
+            image = Image.open(
                 io.BytesIO(image_bytes)
             ).convert("RGB")
 
-            response = predict_image(
-                uploaded_image
-            )
+            result = predict_image(image)
 
         except Exception as error:
 
-            response = {
+            print("REQUEST FAILED:", repr(error))
+
+            result = {
                 "error": str(error)
             }
 
-        st.session_state.bridge_response = {
+        st.session_state.clarityx_response = {
 
             "request_id": request_id,
 
-            "data": response
+            "data": result
 
         }
 
+        # Send result back to the frontend.
         st.rerun()
-
