@@ -119,65 +119,119 @@ def build_gradcam_model(model):
 
     print("BUILDING GRAD-CAM MODEL...", flush=True)
 
-    candidate_models = []
+    # ------------------------------------------------------
+    # 1. GET DENSENET121
+    # ------------------------------------------------------
 
-    # Find the nested DenseNet121 feature extractor
+    base_model = model.get_layer("densenet121")
 
-    for layer in model.layers:
+    print("FEATURE EXTRACTOR:", base_model.name, flush=True)
 
-        if isinstance(layer, tf.keras.Model):
+    # ------------------------------------------------------
+    # 2. GET LAST CONVOLUTIONAL LAYER
+    # ------------------------------------------------------
 
-            try:
-
-                output_rank = len(layer.output.shape)
-
-                has_conv = any(
-                    isinstance(sub_layer, tf.keras.layers.Conv2D)
-                    for sub_layer in layer.layers
-                )
-
-                if output_rank == 4 and has_conv:
-
-                    candidate_models.append(layer)
-
-            except Exception:
-                continue
-
-    if not candidate_models:
-
-        raise ValueError(
-            "Could not find the nested DenseNet121 "
-            "convolutional feature extractor."
-        )
-
-    # Select the feature extractor
-
-    base_model = candidate_models[-1]
-
-    print(
-        "FEATURE EXTRACTOR:",
-        base_model.name,
-        flush=True
+    last_conv_layer = base_model.get_layer(
+        "conv5_block16_concat"
     )
 
     print(
-        "FEATURE MAP SHAPE:",
-        base_model.output.shape,
+        "LAST CONVOLUTIONAL LAYER:",
+        last_conv_layer.name,
         flush=True
     )
 
-    # DenseNet121 include_top=False output is the final
-    # convolutional feature map.
+    # ------------------------------------------------------
+    # 3. CREATE FEATURE EXTRACTOR
+    # ------------------------------------------------------
 
-    grad_model = tf.keras.Model(
-        inputs=model.inputs,
+    feature_extractor = tf.keras.Model(
+        inputs=base_model.input,
         outputs=[
-            base_model.output,
-            model.output
+            last_conv_layer.output,
+            base_model.output
         ]
     )
 
-    print("GRAD-CAM MODEL CREATED SUCCESSFULLY!", flush=True)
+    # ------------------------------------------------------
+    # 4. GET ORIGINAL MODEL LAYERS
+    # ------------------------------------------------------
+
+    rescaling_layer = next(
+        layer for layer in model.layers
+        if isinstance(
+            layer,
+            tf.keras.layers.Rescaling
+        )
+    )
+
+    gap_layer = next(
+        layer for layer in model.layers
+        if isinstance(
+            layer,
+            tf.keras.layers.GlobalAveragePooling2D
+        )
+    )
+
+    dropout_layer = next(
+        layer for layer in model.layers
+        if isinstance(
+            layer,
+            tf.keras.layers.Dropout
+        )
+    )
+
+    classifier_layer = model.layers[-1]
+
+    # ------------------------------------------------------
+    # 5. REBUILD THE MODEL CONNECTION
+    # ------------------------------------------------------
+
+    inputs = tf.keras.Input(
+        shape=(224, 224, 3)
+    )
+
+    # Apply original preprocessing
+    x = rescaling_layer(inputs)
+
+    # Extract convolutional features
+    conv_outputs, base_outputs = feature_extractor(
+        x,
+        training=False
+    )
+
+    # Rebuild classification head
+    x = gap_layer(base_outputs)
+
+    x = dropout_layer(
+        x,
+        training=False
+    )
+
+    predictions = classifier_layer(x)
+
+    # ------------------------------------------------------
+    # 6. CREATE FINAL GRAD-CAM MODEL
+    # ------------------------------------------------------
+
+    grad_model = tf.keras.Model(
+        inputs=inputs,
+        outputs=[
+            conv_outputs,
+            predictions
+        ]
+    )
+
+    print(
+        "GRAD-CAM MODEL CREATED SUCCESSFULLY!",
+        flush=True
+    )
+
+    print(
+        "GRAD-CAM FEATURE MAP:",
+        conv_outputs.shape,
+        flush=True
+    )
 
     return grad_model
 
@@ -216,13 +270,6 @@ def preprocess_image(image_bytes):
         dtype=np.float32
     )
 
-    # IMPORTANT:
-    # Use the same DenseNet preprocessing used during training.
-
-    image_array = tf.keras.applications.densenet.preprocess_input(
-        image_array
-    )
-
     image_array = np.expand_dims(
         image_array,
         axis=0
@@ -237,7 +284,6 @@ def preprocess_image(image_bytes):
     print("PREPROCESSING COMPLETED", flush=True)
 
     return original_image, image_array
-
 
 # ==========================================================
 # GENERATE GRAD-CAM HEATMAP
