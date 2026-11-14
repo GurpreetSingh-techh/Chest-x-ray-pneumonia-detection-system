@@ -1,566 +1,131 @@
 import os
-import io
+
+# ==========================================================
+# ENVIRONMENT CONFIGURATION
+# ==========================================================
+
+# Force CPU execution on Streamlit Cloud
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import re
 import base64
+import io
 import uuid
-import shutil
-from pathlib import Path
+import traceback
 
 import streamlit as st
 import streamlit.components.v1 as components
 
 import numpy as np
-from PIL import Image
+import tensorflow as tf
+
+from PIL import Image, UnidentifiedImageError
 
 
-# ============================================================
-# 1. STREAMLIT CONFIGURATION
-# ============================================================
+# ==========================================================
+# STREAMLIT CONFIGURATION
+# ==========================================================
 
 st.set_page_config(
-    page_title="ClarityX | AI Chest X-Ray Analysis",
-    layout="wide",
-    initial_sidebar_state="collapsed"
+    page_title="ClarityX - X-Ray Detection",
+    page_icon="🩻",
+    layout="wide"
 )
 
-ROOT = Path(__file__).parent
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MODEL_PATH = ROOT / "pneumonia_densenet121.keras"
+HTML_PATH = os.path.join(BASE_DIR, "templates", "index.html")
+CSS_PATH = os.path.join(BASE_DIR, "static", "style.css")
+JS_PATH = os.path.join(BASE_DIR, "static", "script.js")
 
-# Automatically find index.html
-if (ROOT / "templates" / "index.html").exists():
-    HTML_PATH = ROOT / "templates" / "index.html"
-else:
-    HTML_PATH = ROOT / "index.html"
+MODEL_PATHS = [
+    os.path.join(BASE_DIR, "pneumonia_densenet121.keras"),
+    os.path.join(BASE_DIR, "models", "pneumonia_densenet121.keras")
+]
 
-STATIC_DIR = ROOT / "static"
+BRIDGE_DIR = os.path.join(BASE_DIR, ".xray_bridge")
 
-COMPONENT_DIR = ROOT / "clarityx_component"
 
-FRONTEND_DIR = COMPONENT_DIR / "frontend"
+# ==========================================================
+# CHECK FILES
+# ==========================================================
 
-IMAGE_SIZE = (224, 224)
+for path in [HTML_PATH, CSS_PATH, JS_PATH]:
 
+    if not os.path.exists(path):
+        st.error(f"Required frontend file not found: {path}")
+        st.stop()
 
-# ============================================================
-# 2. CREATE CUSTOM STREAMLIT COMPONENT FRONTEND
-# ============================================================
 
-def prepare_frontend():
+# ==========================================================
+# LOAD MODEL
+# ==========================================================
 
-    FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
-
-    if not HTML_PATH.exists():
-        raise FileNotFoundError("index.html was not found.")
-
-    if not (STATIC_DIR / "style.css").exists():
-        raise FileNotFoundError("static/style.css was not found.")
-
-    if not (STATIC_DIR / "script.js").exists():
-        raise FileNotFoundError("static/script.js was not found.")
-
-    html = HTML_PATH.read_text(encoding="utf-8")
-
-    # Replace Flask CSS reference with local CSS file
-    html = re.sub(
-        r"\{\{\s*url_for\(['\"]static['\"],\s*filename=['\"]style\.css['\"]\)\s*\}\}",
-        "style.css",
-        html
-    )
-
-    # Replace Flask JavaScript reference
-    script_pattern = (
-        r'<script\s+src=["\']'
-        r'\{\{\s*url_for\([\'"]static[\'"],\s*filename=[\'"]script\.js[\'"]'
-        r'(?:,\s*v=\d+)?\)\s*\}\}'
-        r'["\']\s*>\s*</script>'
-    )
-
-    replacement = """
-    <script src="bridge.js"></script>
-    <script src="script.js"></script>
-    """
-
-    html, count = re.subn(
-        script_pattern,
-        replacement,
-        html,
-        count=1
-    )
-
-    if count == 0:
-        raise RuntimeError(
-            "Could not find the original script.js reference in index.html."
-        )
-
-    # Save a browser-ready copy
-    (FRONTEND_DIR / "index.html").write_text(
-        html,
-        encoding="utf-8"
-    )
-
-    shutil.copy2(
-        STATIC_DIR / "style.css",
-        FRONTEND_DIR / "style.css"
-    )
-
-    shutil.copy2(
-        STATIC_DIR / "script.js",
-        FRONTEND_DIR / "script.js"
-    )
-
-    # --------------------------------------------------------
-    # JAVASCRIPT - STREAMLIT COMMUNICATION BRIDGE
-    # --------------------------------------------------------
-
-    bridge_js = r"""
-(() => {
-
-    const pendingRequests = new Map();
-
-    // Send uploaded image information to Python
-    function sendToPython(value) {
-
-        window.parent.postMessage({
-
-            isStreamlitMessage: true,
-
-            type: "streamlit:setComponentValue",
-
-            value: value,
-
-            dataType: "json"
-
-        }, "*");
-
-    }
-
-
-    // Calculate complete webpage height
-    function setFrameHeight() {
-
-        const body = document.body;
-
-        const html = document.documentElement;
-
-        const height = Math.ceil(Math.max(
-
-            body.scrollHeight,
-
-            body.offsetHeight,
-
-            body.clientHeight,
-
-            html.scrollHeight,
-
-            html.offsetHeight,
-
-            html.clientHeight,
-
-            body.getBoundingClientRect().height,
-
-            html.getBoundingClientRect().height
-
-        )) + 50;
-
-
-        window.parent.postMessage({
-
-            isStreamlitMessage: true,
-
-            type: "streamlit:setFrameHeight",
-
-            height: height
-
-        }, "*");
-
-    }
-
-
-    // Receive prediction result from Python
-    window.addEventListener("message", (event) => {
-
-        const message = event.data;
-
-        if (!message || message.type !== "streamlit:render") {
-            return;
-        }
-
-        const args = message.args || {};
-
-        const result = args.result;
-
-        if (
-            result &&
-            result.request_id &&
-            pendingRequests.has(result.request_id)
-        ) {
-
-            const resolve = pendingRequests.get(
-                result.request_id
-            );
-
-            pendingRequests.delete(result.request_id);
-
-            resolve({
-
-                ok: result.ok !== false,
-
-                status: result.ok === false ? 400 : 200,
-
-                json: async () => result.payload || {}
-
-            });
-
-        }
-
-        setTimeout(setFrameHeight, 100);
-
-    });
-
-
-    // Keep original JavaScript fetch functionality
-    const originalFetch = window.fetch.bind(window);
-
-
-    window.fetch = function(input, init = {}) {
-
-        const url = typeof input === "string"
-            ? input
-            : (input && input.url) || "";
-
-
-        // Intercept only the original prediction request
-        if (
-            !url.endsWith("/predict") ||
-            !init.body ||
-            !(init.body instanceof FormData)
-        ) {
-
-            return originalFetch(input, init);
-
-        }
-
-
-        const file = init.body.get("image");
-
-
-        if (!(file instanceof Blob)) {
-
-            return Promise.resolve({
-
-                ok: false,
-
-                status: 400,
-
-                json: async () => ({
-                    error: "Please select an image."
-                })
-
-            });
-
-        }
-
-
-        const requestId = (
-            window.crypto && crypto.randomUUID
-        )
-            ? crypto.randomUUID()
-            : String(Date.now()) +
-              Math.random().toString(16).slice(2);
-
-
-        return new Promise((resolve) => {
-
-            pendingRequests.set(requestId, resolve);
-
-            const reader = new FileReader();
-
-
-            reader.onload = () => {
-
-                sendToPython({
-
-                    request_id: requestId,
-
-                    filename: file.name || "xray.png",
-
-                    mime_type: file.type || "image/png",
-
-                    image_data: reader.result
-
-                });
-
-            };
-
-
-            reader.onerror = () => {
-
-                pendingRequests.delete(requestId);
-
-                resolve({
-
-                    ok: false,
-
-                    status: 400,
-
-                    json: async () => ({
-                        error: "Could not read the image."
-                    })
-
-                });
-
-            };
-
-
-            reader.readAsDataURL(file);
-
-        });
-
-    };
-
-
-    // --------------------------------------------------------
-    // DYNAMIC IFRAME HEIGHT
-    // --------------------------------------------------------
-
-    function updateHeightRepeatedly() {
-
-        setFrameHeight();
-
-        [100, 300, 700, 1500, 2500, 4000].forEach(delay => {
-
-            setTimeout(setFrameHeight, delay);
-
-        });
-
-    }
-
-
-    window.addEventListener("load", () => {
-
-        updateHeightRepeatedly();
-
-
-        // Watch changes in webpage size
-        if (window.ResizeObserver) {
-
-            const resizeObserver = new ResizeObserver(() => {
-
-                setFrameHeight();
-
-            });
-
-            resizeObserver.observe(document.body);
-
-            resizeObserver.observe(
-                document.documentElement
-            );
-
-        }
-
-
-        // Watch dynamically added content
-        if (window.MutationObserver) {
-
-            const mutationObserver = new MutationObserver(() => {
-
-                setFrameHeight();
-
-            });
-
-            mutationObserver.observe(document.body, {
-
-                childList: true,
-
-                subtree: true,
-
-                attributes: true
-
-            });
-
-        }
-
-
-        // Recalculate after images load
-        document.querySelectorAll("img").forEach(img => {
-
-            img.addEventListener("load", setFrameHeight);
-
-        });
-
-
-        // Recalculate after browser resizing
-        window.addEventListener("resize", setFrameHeight);
-
-    });
-
-
-    // Tell Streamlit that component is ready
-    window.parent.postMessage({
-
-        isStreamlitMessage: true,
-
-        type: "streamlit:componentReady",
-
-        apiVersion: 1
-
-    }, "*");
-
-})();
-"""
-
-    (FRONTEND_DIR / "bridge.js").write_text(
-        bridge_js,
-        encoding="utf-8"
-    )
-
-
-# ============================================================
-# 3. LOAD TRAINED MODEL
-# ============================================================
-
-@st.cache_resource(show_spinner="Loading AI model...")
+@st.cache_resource
 def load_model():
 
-    import tensorflow as tf
+    print("====================================", flush=True)
+    print("LOADING DENSENET121 MODEL...", flush=True)
 
-    if not MODEL_PATH.exists():
+    model_path = next(
+        (path for path in MODEL_PATHS if os.path.exists(path)),
+        None
+    )
+
+    if model_path is None:
 
         raise FileNotFoundError(
-            "pneumonia_densenet121.keras was not found."
+            "Model file not found. Expected "
+            "pneumonia_densenet121.keras in the root "
+            "or models folder."
         )
 
+    print(f"MODEL PATH: {model_path}", flush=True)
+
     model = tf.keras.models.load_model(
-        MODEL_PATH,
+        model_path,
         compile=False
     )
 
-    print("MODEL LOADED SUCCESSFULLY")
-
-    print("MODEL INPUT:", model.input_shape)
-
-    print("MODEL OUTPUT:", model.output_shape)
+    print("MODEL LOADED SUCCESSFULLY!", flush=True)
+    print(f"MODEL INPUT: {model.input_shape}", flush=True)
+    print(f"MODEL OUTPUT: {model.output_shape}", flush=True)
+    print("====================================", flush=True)
 
     return model
 
 
-# ============================================================
-# 4. FIND DENSENET121 BACKBONE AND LAST CONVOLUTION LAYER
-# ============================================================
-
-def find_backbone(model):
-
-    import tensorflow as tf
-
-    for layer in model.layers:
-
-        if isinstance(layer, tf.keras.Model):
-
-            if "densenet" in layer.name.lower():
-
-                return layer
-
-            for nested_layer in layer.layers:
-
-                if isinstance(nested_layer, tf.keras.layers.Conv2D):
-
-                    return layer
-
-    raise ValueError(
-        "DenseNet121 backbone was not found in the model."
-    )
-
-
-def find_last_conv_layer(backbone):
-
-    import tensorflow as tf
-
-    conv_layers = []
-
-    for layer in backbone.layers:
-
-        if isinstance(layer, tf.keras.layers.Conv2D):
-
-            conv_layers.append(layer)
-
-        elif isinstance(layer, tf.keras.Model):
-
-            for nested_layer in layer.layers:
-
-                if isinstance(
-                    nested_layer,
-                    tf.keras.layers.Conv2D
-                ):
-
-                    conv_layers.append(nested_layer)
-
-    if not conv_layers:
-
-        raise ValueError(
-            "No convolution layer found in DenseNet121."
-        )
-
-    return conv_layers[-1]
-
-
-# ============================================================
-# 5. BUILD GRAD-CAM MODEL
-# ============================================================
-
-@st.cache_resource
-def build_gradcam_model():
-
-    import tensorflow as tf
+try:
 
     model = load_model()
 
-    backbone = find_backbone(model)
+except Exception as e:
 
-    last_conv = find_last_conv_layer(backbone)
+    print("MODEL LOADING FAILED!", flush=True)
+    traceback.print_exc()
 
-    feature_extractor = tf.keras.Model(
-
-        inputs=backbone.input,
-
-        outputs=[
-            last_conv.output,
-            backbone.output
-        ]
-
-    )
-
-    backbone_index = model.layers.index(backbone)
-
-    classifier_layers = model.layers[backbone_index + 1:]
+    st.error(f"Model loading failed: {str(e)}")
+    st.stop()
 
 
-    print("GRAD-CAM BACKBONE:", backbone.name)
+# ==========================================================
+# IMAGE PREPROCESSING
+# ==========================================================
 
-    print("GRAD-CAM LAYER:", last_conv.name)
+def preprocess_image(image_bytes):
 
-    print("GRAD-CAM MODEL READY")
+    print("IMAGE PREPROCESSING STARTED", flush=True)
 
+    image = Image.open(
+        io.BytesIO(image_bytes)
+    ).convert("RGB")
 
-    return (
-        feature_extractor,
-        classifier_layers
-    )
+    print(f"ORIGINAL IMAGE SIZE: {image.size}", flush=True)
 
+    image = image.resize((224, 224))
 
-# ============================================================
-# 6. IMAGE PREPROCESSING
-# ============================================================
-
-def preprocess_image(image):
-
-    import tensorflow as tf
-
-    image = image.convert("RGB")
-
-    image = image.resize(IMAGE_SIZE)
-
-    image_array = np.asarray(
+    image_array = np.array(
         image,
         dtype=np.float32
     )
@@ -570,445 +135,539 @@ def preprocess_image(image):
         axis=0
     )
 
-    # DenseNet121 preprocessing
-    image_array = tf.keras.applications.densenet.preprocess_input(
-        image_array
+    print(
+        f"PREPROCESSED IMAGE SHAPE: {image_array.shape}",
+        flush=True
     )
+
+    print("IMAGE PREPROCESSING COMPLETED", flush=True)
 
     return image_array
 
 
-# ============================================================
-# 7. GENERATE GRAD-CAM
-# ============================================================
+# IMPORTANT:
+# This assumes your model was trained using:
+# RGB images, 224x224 dimensions, pixel values 0-255.
+# Your actual training preprocessing must match this.
 
-def generate_gradcam(image_array, prediction_class):
 
-    import tensorflow as tf
+# ==========================================================
+# MODEL PREDICTION
+# ==========================================================
 
-    feature_extractor, classifier_layers = build_gradcam_model()
+def predict_image(image_bytes):
 
-    input_tensor = tf.convert_to_tensor(
-        image_array,
-        dtype=tf.float32
-    )
+    print("====================================", flush=True)
+    print("IMAGE RECEIVED BY MODEL BACKEND", flush=True)
 
-    with tf.GradientTape() as tape:
+    image_array = preprocess_image(image_bytes)
 
-        conv_outputs, backbone_output = feature_extractor(
-            input_tensor,
-            training=False
-        )
+    print("PREDICTION STARTED", flush=True)
 
-        tape.watch(conv_outputs)
+    with tf.device("/CPU:0"):
 
-        x = backbone_output
-
-        for layer in classifier_layers:
-
-            x = layer(x, training=False)
-
-        predictions = x
-
-        if prediction_class == "PNEUMONIA":
-
-            loss = predictions[:, 0]
-
-        else:
-
-            loss = 1.0 - predictions[:, 0]
-
-
-    gradients = tape.gradient(
-        loss,
-        conv_outputs
-    )
-
-    if gradients is None:
-
-        raise ValueError(
-            "Gradients could not be calculated for Grad-CAM."
-        )
-
-
-    pooled_gradients = tf.reduce_mean(
-        gradients,
-        axis=(0, 1, 2)
-    )
-
-
-    conv_outputs = conv_outputs[0]
-
-    heatmap = tf.reduce_sum(
-
-        conv_outputs * pooled_gradients,
-
-        axis=-1
-
-    )
-
-
-    heatmap = tf.maximum(
-        heatmap,
-        0
-    )
-
-    max_value = tf.reduce_max(heatmap)
-
-    heatmap = heatmap / (
-        max_value + tf.keras.backend.epsilon()
-    )
-
-    return heatmap.numpy()
-
-
-# ============================================================
-# 8. CREATE GRAD-CAM IMAGE
-# ============================================================
-
-def create_gradcam_image(original_image, heatmap):
-
-    import matplotlib.cm as cm
-
-    original_image = original_image.convert("RGB")
-
-    original_image = original_image.resize(IMAGE_SIZE)
-
-    original_array = np.asarray(
-        original_image,
-        dtype=np.float32
-    )
-
-    heatmap_image = Image.fromarray(
-
-        np.uint8(heatmap * 255)
-
-    )
-
-    heatmap_image = heatmap_image.resize(
-        IMAGE_SIZE
-    )
-
-    heatmap_array = np.asarray(
-        heatmap_image,
-        dtype=np.float32
-    ) / 255.0
-
-
-    # JET colour map
-    jet = cm.get_cmap("jet")
-
-    coloured_heatmap = jet(
-        heatmap_array
-    )[:, :, :3]
-
-    coloured_heatmap = coloured_heatmap * 255
-
-
-    # Overlay heatmap on original X-ray
-    overlay = (
-        0.60 * original_array +
-        0.40 * coloured_heatmap
-    )
-
-    overlay = np.clip(
-        overlay,
-        0,
-        255
-    ).astype(np.uint8)
-
-
-    result_image = Image.fromarray(overlay)
-
-    buffer = io.BytesIO()
-
-    result_image.save(
-        buffer,
-        format="PNG"
-    )
-
-    encoded_image = base64.b64encode(
-        buffer.getvalue()
-    ).decode("utf-8")
-
-    return encoded_image
-
-
-# ============================================================
-# 9. PREDICT IMAGE
-# ============================================================
-
-def predict_image(model, request):
-
-    request_id = request.get(
-        "request_id",
-        str(uuid.uuid4())
-    )
-
-    try:
-
-        data_url = request.get(
-            "image_data",
-            ""
-        )
-
-        if "," not in data_url:
-
-            raise ValueError(
-                "Invalid image data."
-            )
-
-        image_bytes = base64.b64decode(
-            data_url.split(",", 1)[1]
-        )
-
-        original_image = Image.open(
-            io.BytesIO(image_bytes)
-        ).convert("RGB")
-
-
-        # Preprocessing
-        image_array = preprocess_image(
-            original_image
-        )
-
-
-        print("IMAGE PREPROCESSING COMPLETED")
-
-
-        # Prediction
-        raw_prediction = model.predict(
+        prediction = model.predict(
             image_array,
             verbose=0
         )
 
-        raw_score = float(
-            raw_prediction[0][0]
+    print("RAW MODEL OUTPUT:", prediction, flush=True)
+
+    prediction = np.asarray(prediction).flatten()
+
+    if len(prediction) == 1:
+
+        pneumonia_score = float(prediction[0])
+
+    elif len(prediction) == 2:
+
+        pneumonia_score = float(prediction[1])
+
+    else:
+
+        raise ValueError(
+            f"Unexpected model output: {prediction}"
         )
 
+    pneumonia_score = float(
+        np.clip(pneumonia_score, 0, 1)
+    )
 
-        pneumonia_score = raw_score * 100
+    normal_score = 1.0 - pneumonia_score
 
-        normal_score = (1 - raw_score) * 100
+    if pneumonia_score >= 0.5:
 
+        result = "Pneumonia Detected"
 
-        if raw_score >= 0.5:
-
-            prediction = "PNEUMONIA"
-
-            prediction_class = "PNEUMONIA"
-
-            description = (
-                "The model output is higher for the "
-                "Pneumonia category."
-            )
-
-        else:
-
-            prediction = "NORMAL"
-
-            prediction_class = "NORMAL"
-
-            description = (
-                "The model output is higher for the "
-                "Normal category."
-            )
-
-
-        print("PREDICTION:", prediction)
-
-
-        # ----------------------------------------------------
-        # GRAD-CAM GENERATION
-        # ----------------------------------------------------
-
-        gradcam_base64 = None
-
-        gradcam_message = None
-
-        try:
-
-            heatmap = generate_gradcam(
-                image_array,
-                prediction_class
-            )
-
-            gradcam_base64 = create_gradcam_image(
-                original_image,
-                heatmap
-            )
-
-            print("GRAD-CAM GENERATED SUCCESSFULLY")
-
-        except Exception as gradcam_error:
-
-            gradcam_message = str(
-                gradcam_error
-            )
-
-            print(
-                "GRAD-CAM ERROR:",
-                gradcam_message
-            )
-
-
-        # ----------------------------------------------------
-        # RESPONSE TO ORIGINAL JAVASCRIPT
-        # ----------------------------------------------------
-
-        payload = {
-
-            "prediction": prediction,
-
-            "normal_score": round(
-                normal_score,
-                2
-            ),
-
-            "pneumonia_score": round(
-                pneumonia_score,
-                2
-            ),
-
-            "description": description,
-
-            "gradcam": gradcam_base64,
-
-            "gradcam_message": gradcam_message
-
-        }
-
-
-        return {
-
-            "request_id": request_id,
-
-            "ok": True,
-
-            "payload": payload
-
-        }
-
-
-    except Exception as error:
-
-        print(
-            "PREDICTION ERROR:",
-            str(error)
+        description = (
+            "The model detected patterns associated "
+            "with pneumonia in this X-ray image."
         )
 
-        return {
+    else:
 
-            "request_id": request_id,
+        result = "Normal"
 
-            "ok": False,
+        description = (
+            "The model classified this X-ray image "
+            "as normal."
+        )
 
-            "payload": {
+    response = {
 
-                "error": str(error)
+        "prediction": result,
+
+        "normal_score": round(
+            normal_score * 100, 2
+        ),
+
+        "pneumonia_score": round(
+            pneumonia_score * 100, 2
+        ),
+
+        "description": description,
+
+        "gradcam": None,
+
+        "gradcam_message": (
+            "Grad-CAM visualization is not configured "
+            "in this backend."
+        )
+    }
+
+    print("PREDICTION COMPLETED SUCCESSFULLY!", flush=True)
+    print("RESULT:", result, flush=True)
+    print("NORMAL SCORE:", response["normal_score"], flush=True)
+    print(
+        "PNEUMONIA SCORE:",
+        response["pneumonia_score"],
+        flush=True
+    )
+    print("====================================", flush=True)
+
+    return response
+
+
+# ==========================================================
+# CREATE FRONTEND BRIDGE
+# ==========================================================
+
+def create_bridge():
+
+    os.makedirs(
+        BRIDGE_DIR,
+        exist_ok=True
+    )
+
+    with open(HTML_PATH, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    with open(CSS_PATH, "r", encoding="utf-8") as f:
+        css = f.read()
+
+    with open(JS_PATH, "r", encoding="utf-8") as f:
+        javascript = f.read()
+
+    # ------------------------------------------------------
+    # STREAMLIT COMMUNICATION BRIDGE
+    # ------------------------------------------------------
+
+    bridge_javascript = r"""
+    <script>
+
+    function sendToStreamlit(type, data = {}) {
+
+        window.parent.postMessage({
+
+            isStreamlitMessage: true,
+            type: type,
+            ...data
+
+        }, "*");
+
+    }
+
+
+    // Tell Streamlit that the component is ready
+
+    sendToStreamlit(
+        "streamlit:componentReady",
+        {
+            apiVersion: 1
+        }
+    );
+
+
+    // Store pending prediction requests
+
+    const pendingRequests = new Map();
+
+
+    // Receive Python responses
+
+    window.addEventListener("message", function(event) {
+
+        const message = event.data;
+
+        if (!message || !message.isStreamlitMessage) {
+            return;
+        }
+
+        if (message.type === "streamlit:render") {
+
+            const response = message.args?.response;
+
+            if (!response || !response.id) {
+                return;
+            }
+
+            const pending = pendingRequests.get(
+                response.id
+            );
+
+            if (pending) {
+
+                pendingRequests.delete(
+                    response.id
+                );
+
+                pending.resolve(
+                    new Response(
+                        JSON.stringify(response.data),
+                        {
+                            status: response.data.error ? 500 : 200,
+                            headers: {
+                                "Content-Type": "application/json"
+                            }
+                        }
+                    )
+                );
 
             }
 
         }
 
+    });
 
-# ============================================================
-# 10. DECLARE STREAMLIT COMPONENT
-# ============================================================
 
-try:
+    // ------------------------------------------------------
+    // INTERCEPT ORIGINAL FETCH
+    // ------------------------------------------------------
 
-    prepare_frontend()
+    const originalFetch = window.fetch.bind(window);
 
-    clarityx_component = components.declare_component(
+    window.fetch = async function(input, init = {}) {
 
-        "clarityx_frontend",
+        const url = typeof input === "string"
+            ? input
+            : input.url;
 
-        path=str(FRONTEND_DIR)
+        if (
+            url.endsWith("/predict") &&
+            init.body instanceof FormData
+        ) {
 
+            const file = init.body.get("image");
+
+            if (!file) {
+
+                return new Response(
+                    JSON.stringify({
+                        error: "No image uploaded."
+                    }),
+                    {
+                        status: 400,
+                        headers: {
+                            "Content-Type": "application/json"
+                        }
+                    }
+                );
+
+            }
+
+            return new Promise((resolve) => {
+
+                const reader = new FileReader();
+
+                reader.onload = function() {
+
+                    const base64Image =
+                        reader.result.split(",")[1];
+
+                    const requestId =
+                        crypto.randomUUID
+                            ? crypto.randomUUID()
+                            : Date.now().toString() +
+                              Math.random().toString(36).slice(2);
+
+
+                    pendingRequests.set(
+                        requestId,
+                        {
+                            resolve: resolve
+                        }
+                    );
+
+
+                    sendToStreamlit(
+                        "streamlit:setComponentValue",
+                        {
+                            value: {
+
+                                id: requestId,
+
+                                filename: file.name,
+
+                                image: base64Image
+
+                            }
+                        }
+                    );
+
+                };
+
+
+                reader.onerror = function() {
+
+                    resolve(
+                        new Response(
+                            JSON.stringify({
+                                error: "Unable to read image."
+                            }),
+                            {
+                                status: 500,
+                                headers: {
+                                    "Content-Type": "application/json"
+                                }
+                            }
+                        )
+                    );
+
+                };
+
+
+                reader.readAsDataURL(file);
+
+            });
+
+        }
+
+
+        return originalFetch(input, init);
+
+    };
+
+
+    // ------------------------------------------------------
+    // UPDATE COMPONENT HEIGHT
+    // ------------------------------------------------------
+
+    function updateHeight() {
+
+        const height = Math.max(
+            document.body.scrollHeight,
+            document.documentElement.scrollHeight
+        );
+
+        sendToStreamlit(
+            "streamlit:setFrameHeight",
+            {
+                height: height
+            }
+        );
+
+    }
+
+
+    window.addEventListener("load", updateHeight);
+    window.addEventListener("resize", updateHeight);
+
+    new ResizeObserver(
+        updateHeight
+    ).observe(document.body);
+
+    </script>
+    """
+
+    # ------------------------------------------------------
+    # INSERT CSS
+    # ------------------------------------------------------
+
+    style_tag = f"""
+    <style>
+    {css}
+    </style>
+    """
+
+    html = re.sub(
+        r'<link[^>]+style\.css[^>]*>',
+        lambda match: style_tag,
+        html,
+        flags=re.IGNORECASE
     )
 
-except Exception as error:
+    # ------------------------------------------------------
+    # INSERT BRIDGE BEFORE ORIGINAL JAVASCRIPT
+    # ------------------------------------------------------
 
-    st.error(
-        f"Frontend initialization error: {error}"
+    script_tag = f"""
+    {bridge_javascript}
+
+    <script>
+    {javascript}
+    </script>
+    """
+
+    html = re.sub(
+        r'<script[^>]+script\.js[^>]*>\s*</script>',
+        lambda match: script_tag,
+        html,
+        flags=re.IGNORECASE
     )
 
-    st.stop()
+    # ------------------------------------------------------
+    # SAVE GENERATED HTML
+    # ------------------------------------------------------
+
+    with open(
+        os.path.join(BRIDGE_DIR, "index.html"),
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(html)
+
+    print("FRONTEND BRIDGE CREATED SUCCESSFULLY", flush=True)
+
+    return BRIDGE_DIR
 
 
-# ============================================================
-# 11. SESSION STATE
-# ============================================================
+# ==========================================================
+# REGISTER STREAMLIT COMPONENT
+# ==========================================================
 
-if "clarityx_result" not in st.session_state:
+component_directory = create_bridge()
 
-    st.session_state.clarityx_result = None
-
-
-if "last_request_id" not in st.session_state:
-
-    st.session_state.last_request_id = None
-
-
-# ============================================================
-# 12. DISPLAY COMPLETE WEBPAGE
-# ============================================================
-
-request = clarityx_component(
-
-    result=st.session_state.clarityx_result,
-
-    key="clarityx_frontend",
-
-    default=None
-
+xray_component = components.declare_component(
+    "xray_frontend",
+    path=component_directory
 )
 
 
-# ============================================================
-# 13. HANDLE IMAGE UPLOAD AND PREDICTION
-# ============================================================
+# ==========================================================
+# SESSION STATE
+# ==========================================================
+
+if "bridge_response" not in st.session_state:
+
+    st.session_state.bridge_response = None
+
+
+if "processed_requests" not in st.session_state:
+
+    st.session_state.processed_requests = set()
+
+
+# ==========================================================
+# RECEIVE FRONTEND REQUEST
+# ==========================================================
+
+request = xray_component(
+    response=st.session_state.bridge_response,
+    key="xray_frontend"
+)
+
+
+# ==========================================================
+# PROCESS UPLOADED IMAGE
+# ==========================================================
 
 if isinstance(request, dict):
 
-    request_id = request.get(
-        "request_id"
-    )
+    request_id = request.get("id")
 
     if (
-        request_id and
-        request_id != st.session_state.last_request_id
+        request_id
+        and request_id not in st.session_state.processed_requests
     ):
+
+        st.session_state.processed_requests.add(request_id)
+
+        print("NEW REQUEST RECEIVED", flush=True)
 
         try:
 
-            model = load_model()
+            # ----------------------------------------------
+            # CHECK IMAGE SIZE
+            # ----------------------------------------------
 
-            result = predict_image(
-                model,
-                request
+            image_data = base64.b64decode(
+                request["image"],
+                validate=True
             )
 
-            st.session_state.clarityx_result = result
+            if len(image_data) > 10 * 1024 * 1024:
 
-        except Exception as error:
+                raise ValueError(
+                    "Image size exceeds the 10 MB limit."
+                )
 
-            st.session_state.clarityx_result = {
+            # ----------------------------------------------
+            # VALIDATE IMAGE
+            # ----------------------------------------------
 
-                "request_id": request_id,
+            image = Image.open(
+                io.BytesIO(image_data)
+            )
 
-                "ok": False,
+            image.verify()
 
-                "payload": {
+            print(
+                "IMAGE VALIDATION SUCCESSFUL",
+                flush=True
+            )
 
-                    "error": str(error)
+            # ----------------------------------------------
+            # RUN MODEL
+            # ----------------------------------------------
+
+            result = predict_image(image_data)
+
+            response_data = {
+
+                "id": request_id,
+
+                "data": result
+
+            }
+
+        except Exception as e:
+
+            print("PREDICTION ERROR!", flush=True)
+
+            traceback.print_exc()
+
+            response_data = {
+
+                "id": request_id,
+
+                "data": {
+
+                    "error": str(e)
 
                 }
 
             }
 
+        # ----------------------------------------------
+        # RETURN RESPONSE TO JAVASCRIPT
+        # ----------------------------------------------
 
-        st.session_state.last_request_id = request_id
+        st.session_state.bridge_response = response_data
+
+        print(
+            "SENDING RESPONSE TO FRONTEND",
+            flush=True
+        )
 
         st.rerun()
