@@ -1,8 +1,18 @@
 import os
+
+# ==========================================================
+# ENVIRONMENT CONFIGURATION
+# ==========================================================
+
+# Force CPU execution on Streamlit Cloud
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import re
 import base64
 import io
 import uuid
+import traceback
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -38,11 +48,25 @@ BRIDGE_DIR = os.path.join(BASE_DIR, ".xray_bridge")
 
 
 # ==========================================================
+# CHECK FILES
+# ==========================================================
+
+for path in [HTML_PATH, CSS_PATH, JS_PATH]:
+
+    if not os.path.exists(path):
+        st.error(f"Required frontend file not found: {path}")
+        st.stop()
+
+
+# ==========================================================
 # LOAD MODEL
 # ==========================================================
 
 @st.cache_resource
 def load_model():
+
+    print("====================================", flush=True)
+    print("LOADING DENSENET121 MODEL...", flush=True)
 
     model_path = next(
         (path for path in MODEL_PATHS if os.path.exists(path)),
@@ -50,24 +74,38 @@ def load_model():
     )
 
     if model_path is None:
+
         raise FileNotFoundError(
-            "Model not found. Put pneumonia_densenet121.keras "
-            "in the project root or inside the models folder."
+            "Model file not found. Expected "
+            "pneumonia_densenet121.keras in the root "
+            "or models folder."
         )
+
+    print(f"MODEL PATH: {model_path}", flush=True)
 
     model = tf.keras.models.load_model(
         model_path,
         compile=False
     )
 
+    print("MODEL LOADED SUCCESSFULLY!", flush=True)
+    print(f"MODEL INPUT: {model.input_shape}", flush=True)
+    print(f"MODEL OUTPUT: {model.output_shape}", flush=True)
+    print("====================================", flush=True)
+
     return model
 
 
 try:
+
     model = load_model()
 
 except Exception as e:
-    st.error(f"Model loading error: {e}")
+
+    print("MODEL LOADING FAILED!", flush=True)
+    traceback.print_exc()
+
+    st.error(f"Model loading failed: {str(e)}")
     st.stop()
 
 
@@ -77,9 +115,13 @@ except Exception as e:
 
 def preprocess_image(image_bytes):
 
+    print("IMAGE PREPROCESSING STARTED", flush=True)
+
     image = Image.open(
         io.BytesIO(image_bytes)
     ).convert("RGB")
+
+    print(f"ORIGINAL IMAGE SIZE: {image.size}", flush=True)
 
     image = image.resize((224, 224))
 
@@ -93,13 +135,20 @@ def preprocess_image(image_bytes):
         axis=0
     )
 
+    print(
+        f"PREPROCESSED IMAGE SHAPE: {image_array.shape}",
+        flush=True
+    )
+
+    print("IMAGE PREPROCESSING COMPLETED", flush=True)
+
     return image_array
 
 
 # IMPORTANT:
-# This preprocessing assumes your trained model expects
-# RGB images resized to 224x224 with pixel values 0-255.
-# It must match the preprocessing used during model training.
+# This assumes your model was trained using:
+# RGB images, 224x224 dimensions, pixel values 0-255.
+# Your actual training preprocessing must match this.
 
 
 # ==========================================================
@@ -108,14 +157,23 @@ def preprocess_image(image_bytes):
 
 def predict_image(image_bytes):
 
+    print("====================================", flush=True)
+    print("IMAGE RECEIVED BY MODEL BACKEND", flush=True)
+
     image_array = preprocess_image(image_bytes)
 
-    prediction = model.predict(
-        image_array,
-        verbose=0
-    )
+    print("PREDICTION STARTED", flush=True)
 
-    prediction = np.array(prediction).flatten()
+    with tf.device("/CPU:0"):
+
+        prediction = model.predict(
+            image_array,
+            verbose=0
+        )
+
+    print("RAW MODEL OUTPUT:", prediction, flush=True)
+
+    prediction = np.asarray(prediction).flatten()
 
     if len(prediction) == 1:
 
@@ -128,23 +186,22 @@ def predict_image(image_bytes):
     else:
 
         raise ValueError(
-            "Unexpected model output. "
-            "Expected one sigmoid output or two softmax outputs."
+            f"Unexpected model output: {prediction}"
         )
 
     pneumonia_score = float(
         np.clip(pneumonia_score, 0, 1)
     )
 
-    normal_score = 1 - pneumonia_score
+    normal_score = 1.0 - pneumonia_score
 
     if pneumonia_score >= 0.5:
 
         result = "Pneumonia Detected"
 
         description = (
-            "The model detected patterns associated with "
-            "pneumonia in this X-ray image."
+            "The model detected patterns associated "
+            "with pneumonia in this X-ray image."
         )
 
     else:
@@ -152,10 +209,12 @@ def predict_image(image_bytes):
         result = "Normal"
 
         description = (
-            "The model classified this X-ray image as normal."
+            "The model classified this X-ray image "
+            "as normal."
         )
 
-    return {
+    response = {
+
         "prediction": result,
 
         "normal_score": round(
@@ -172,13 +231,25 @@ def predict_image(image_bytes):
 
         "gradcam_message": (
             "Grad-CAM visualization is not configured "
-            "in this Streamlit backend."
+            "in this backend."
         )
     }
 
+    print("PREDICTION COMPLETED SUCCESSFULLY!", flush=True)
+    print("RESULT:", result, flush=True)
+    print("NORMAL SCORE:", response["normal_score"], flush=True)
+    print(
+        "PNEUMONIA SCORE:",
+        response["pneumonia_score"],
+        flush=True
+    )
+    print("====================================", flush=True)
+
+    return response
+
 
 # ==========================================================
-# CREATE STREAMLIT FRONTEND BRIDGE
+# CREATE FRONTEND BRIDGE
 # ==========================================================
 
 def create_bridge():
@@ -188,47 +259,28 @@ def create_bridge():
         exist_ok=True
     )
 
-    with open(
-        HTML_PATH,
-        "r",
-        encoding="utf-8"
-    ) as file:
+    with open(HTML_PATH, "r", encoding="utf-8") as f:
+        html = f.read()
 
-        html = file.read()
+    with open(CSS_PATH, "r", encoding="utf-8") as f:
+        css = f.read()
 
-    with open(
-        CSS_PATH,
-        "r",
-        encoding="utf-8"
-    ) as file:
-
-        css = file.read()
-
-    with open(
-        JS_PATH,
-        "r",
-        encoding="utf-8"
-    ) as file:
-
-        javascript = file.read()
+    with open(JS_PATH, "r", encoding="utf-8") as f:
+        javascript = f.read()
 
     # ------------------------------------------------------
-    # BRIDGE JAVASCRIPT
+    # STREAMLIT COMMUNICATION BRIDGE
     # ------------------------------------------------------
 
     bridge_javascript = r"""
     <script>
 
-    // Send messages to Streamlit
-
-    function sendToStreamlit(type, data) {
+    function sendToStreamlit(type, data = {}) {
 
         window.parent.postMessage({
 
             isStreamlitMessage: true,
-
             type: type,
-
             ...data
 
         }, "*");
@@ -236,20 +288,22 @@ def create_bridge():
     }
 
 
-    // Notify Streamlit that the component is ready
+    // Tell Streamlit that the component is ready
 
     sendToStreamlit(
         "streamlit:componentReady",
-        { apiVersion: 1 }
+        {
+            apiVersion: 1
+        }
     );
 
 
-    // Keep track of pending prediction requests
+    // Store pending prediction requests
 
     const pendingRequests = new Map();
 
 
-    // Receive prediction results from Python
+    // Receive Python responses
 
     window.addEventListener("message", function(event) {
 
@@ -261,35 +315,33 @@ def create_bridge():
 
         if (message.type === "streamlit:render") {
 
-            const args = message.args || {};
+            const response = message.args?.response;
 
-            const response = args.response;
+            if (!response || !response.id) {
+                return;
+            }
 
-            if (response && response.id) {
+            const pending = pendingRequests.get(
+                response.id
+            );
 
-                const pending = pendingRequests.get(
+            if (pending) {
+
+                pendingRequests.delete(
                     response.id
                 );
 
-                if (pending) {
-
-                    pendingRequests.delete(
-                        response.id
-                    );
-
-                    pending.resolve(
-                        new Response(
-                            JSON.stringify(response.data),
-                            {
-                                status: 200,
-                                headers: {
-                                    "Content-Type": "application/json"
-                                }
+                pending.resolve(
+                    new Response(
+                        JSON.stringify(response.data),
+                        {
+                            status: response.data.error ? 500 : 200,
+                            headers: {
+                                "Content-Type": "application/json"
                             }
-                        )
-                    );
-
-                }
+                        }
+                    )
+                );
 
             }
 
@@ -299,7 +351,7 @@ def create_bridge():
 
 
     // ------------------------------------------------------
-    // INTERCEPT THE ORIGINAL FETCH REQUEST
+    // INTERCEPT ORIGINAL FETCH
     // ------------------------------------------------------
 
     const originalFetch = window.fetch.bind(window);
@@ -311,7 +363,7 @@ def create_bridge():
             : input.url;
 
         if (
-            url === "/predict" &&
+            url.endsWith("/predict") &&
             init.body instanceof FormData
         ) {
 
@@ -343,8 +395,10 @@ def create_bridge():
                         reader.result.split(",")[1];
 
                     const requestId =
-                        Date.now().toString() +
-                        Math.random().toString(36).substring(2);
+                        crypto.randomUUID
+                            ? crypto.randomUUID()
+                            : Date.now().toString() +
+                              Math.random().toString(36).slice(2);
 
 
                     pendingRequests.set(
@@ -358,8 +412,6 @@ def create_bridge():
                     sendToStreamlit(
                         "streamlit:setComponentValue",
                         {
-                            dataType: "json",
-
                             value: {
 
                                 id: requestId,
@@ -369,8 +421,26 @@ def create_bridge():
                                 image: base64Image
 
                             }
-
                         }
+                    );
+
+                };
+
+
+                reader.onerror = function() {
+
+                    resolve(
+                        new Response(
+                            JSON.stringify({
+                                error: "Unable to read image."
+                            }),
+                            {
+                                status: 500,
+                                headers: {
+                                    "Content-Type": "application/json"
+                                }
+                            }
+                        )
                     );
 
                 };
@@ -389,7 +459,7 @@ def create_bridge():
 
 
     // ------------------------------------------------------
-    // SET COMPONENT HEIGHT
+    // UPDATE COMPONENT HEIGHT
     // ------------------------------------------------------
 
     function updateHeight() {
@@ -401,20 +471,16 @@ def create_bridge():
 
         sendToStreamlit(
             "streamlit:setFrameHeight",
-            { height: height }
+            {
+                height: height
+            }
         );
 
     }
 
-    window.addEventListener(
-        "load",
-        updateHeight
-    );
 
-    window.addEventListener(
-        "resize",
-        updateHeight
-    );
+    window.addEventListener("load", updateHeight);
+    window.addEventListener("resize", updateHeight);
 
     new ResizeObserver(
         updateHeight
@@ -423,9 +489,8 @@ def create_bridge():
     </script>
     """
 
-
     # ------------------------------------------------------
-    # INSERT ORIGINAL CSS
+    # INSERT CSS
     # ------------------------------------------------------
 
     style_tag = f"""
@@ -441,9 +506,8 @@ def create_bridge():
         flags=re.IGNORECASE
     )
 
-
     # ------------------------------------------------------
-    # REPLACE ORIGINAL JAVASCRIPT FILE REFERENCE
+    # INSERT BRIDGE BEFORE ORIGINAL JAVASCRIPT
     # ------------------------------------------------------
 
     script_tag = f"""
@@ -461,29 +525,25 @@ def create_bridge():
         flags=re.IGNORECASE
     )
 
-
     # ------------------------------------------------------
-    # SAVE GENERATED COMPONENT HTML
+    # SAVE GENERATED HTML
     # ------------------------------------------------------
-
-    component_html_path = os.path.join(
-        BRIDGE_DIR,
-        "index.html"
-    )
 
     with open(
-        component_html_path,
+        os.path.join(BRIDGE_DIR, "index.html"),
         "w",
         encoding="utf-8"
-    ) as file:
+    ) as f:
 
-        file.write(html)
+        f.write(html)
+
+    print("FRONTEND BRIDGE CREATED SUCCESSFULLY", flush=True)
 
     return BRIDGE_DIR
 
 
 # ==========================================================
-# REGISTER CUSTOM STREAMLIT COMPONENT
+# REGISTER STREAMLIT COMPONENT
 # ==========================================================
 
 component_directory = create_bridge()
@@ -495,7 +555,7 @@ xray_component = components.declare_component(
 
 
 # ==========================================================
-# PROCESS FRONTEND REQUESTS
+# SESSION STATE
 # ==========================================================
 
 if "bridge_response" not in st.session_state:
@@ -508,11 +568,19 @@ if "processed_requests" not in st.session_state:
     st.session_state.processed_requests = set()
 
 
+# ==========================================================
+# RECEIVE FRONTEND REQUEST
+# ==========================================================
+
 request = xray_component(
     response=st.session_state.bridge_response,
     key="xray_frontend"
 )
 
+
+# ==========================================================
+# PROCESS UPLOADED IMAGE
+# ==========================================================
 
 if isinstance(request, dict):
 
@@ -523,54 +591,83 @@ if isinstance(request, dict):
         and request_id not in st.session_state.processed_requests
     ):
 
-        st.session_state.processed_requests.add(
-            request_id
-        )
+        st.session_state.processed_requests.add(request_id)
+
+        print("NEW REQUEST RECEIVED", flush=True)
 
         try:
 
-            # Decode uploaded image
+            # ----------------------------------------------
+            # CHECK IMAGE SIZE
+            # ----------------------------------------------
 
             image_data = base64.b64decode(
-                request["image"]
+                request["image"],
+                validate=True
             )
 
-            # Check image format
+            if len(image_data) > 10 * 1024 * 1024:
 
-            Image.open(
+                raise ValueError(
+                    "Image size exceeds the 10 MB limit."
+                )
+
+            # ----------------------------------------------
+            # VALIDATE IMAGE
+            # ----------------------------------------------
+
+            image = Image.open(
                 io.BytesIO(image_data)
-            ).verify()
+            )
 
-            # Run prediction
+            image.verify()
+
+            print(
+                "IMAGE VALIDATION SUCCESSFUL",
+                flush=True
+            )
+
+            # ----------------------------------------------
+            # RUN MODEL
+            # ----------------------------------------------
 
             result = predict_image(image_data)
 
             response_data = {
+
                 "id": request_id,
+
                 "data": result
-            }
 
-        except UnidentifiedImageError:
-
-            response_data = {
-                "id": request_id,
-                "data": {
-                    "error": "Invalid image file."
-                }
             }
 
         except Exception as e:
 
+            print("PREDICTION ERROR!", flush=True)
+
+            traceback.print_exc()
+
             response_data = {
+
                 "id": request_id,
+
                 "data": {
+
                     "error": str(e)
+
                 }
+
             }
 
-
-        # Send result back to original JavaScript
+        # ----------------------------------------------
+        # RETURN RESPONSE TO JAVASCRIPT
+        # ----------------------------------------------
 
         st.session_state.bridge_response = response_data
+
+        print(
+            "SENDING RESPONSE TO FRONTEND",
+            flush=True
+        )
 
         st.rerun()
