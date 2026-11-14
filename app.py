@@ -1,4 +1,3 @@
-```python
 import os
 import re
 import io
@@ -835,4 +834,4 @@ if component_value is not None:
         }
 
         st.rerun()
-```
+
