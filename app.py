@@ -27,7 +27,11 @@ ROOT = Path(__file__).parent
 
 MODEL_PATH = ROOT / "pneumonia_densenet121.keras"
 
-HTML_PATH = ROOT / "index.html"
+# Automatically find index.html
+if (ROOT / "templates" / "index.html").exists():
+    HTML_PATH = ROOT / "templates" / "index.html"
+else:
+    HTML_PATH = ROOT / "index.html"
 
 STATIC_DIR = ROOT / "static"
 
